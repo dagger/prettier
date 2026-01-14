@@ -5,9 +5,9 @@ type Prettier {
   pub source: Directory! @defaultPath(path: "/")
 
   """
-  The Node base image to use.
+  The base image to use.
   """
-  pub nodeImage: Container! = container.from("node:25-alpine")
+  pub baseImageAddress: String! = "node:25-alpine"
 
   """
   Check that if the files are formatted.
@@ -42,7 +42,7 @@ type Prettier {
   }
 
   let base: Container! {
-    nodeImage.
+    container.from(baseImageAddress).
       withMountedCache("/root/.npm", cacheVolume("node-modules")).
       withDirectory("/src", source).
       withWorkdir("/src").

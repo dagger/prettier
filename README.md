@@ -13,7 +13,7 @@ dagger toolchain install github.com/dagger/prettier
 
 ## Customization
 
-The prettier toolchain can be customized in your `dagger.json` to meet your needs:
+The toolchain can be customized in your `dagger.json` to meet your needs:
 
 ```json
 {
@@ -32,11 +32,11 @@ The prettier toolchain can be customized in your `dagger.json` to meet your need
         },
         {
           "argument": "baseImageAddress",
-          "defaultPath": "node:22"       # default: node:25-alpine; use any container image 
+          "default": "node:22"       # default: node:25-alpine; use any container image 
         },
         {
           "argument": "packageManager",
-          "defaultPath": "yarn"          # default: npm; alternatively use yarn, pnpm, or bun
+          "default": "yarn"          # default: npm; alternatively use yarn, pnpm, or bun
         }
       ]
     }

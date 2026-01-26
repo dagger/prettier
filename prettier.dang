@@ -10,10 +10,15 @@ type Prettier {
   pub baseImageAddress: String! = "node:25-alpine"
 
   """
+  The package manager to use.
+  """
+  pub packageManager: String! = "npm"
+
+  """
   Check that if the files are formatted.
   """
   pub check: Void @check {
-    base.
+    node(source, baseImageAddress, packageManager).base.
     withExec(["npx", "prettier", "--check", "."]).
     sync
 
@@ -26,7 +31,7 @@ type Prettier {
   pub write: Changeset {
     let fixFilter = ["**/*.js", "**/*.ts", "**/*.md", "**/*.jsx"]
 
-    let fixed = base.
+    let fixed = node(source, baseImageAddress, packageManager).base.
     withExec(["npx", "prettier", "--write", "."]).
     directory(".").
     withoutDirectory("node_modules")
@@ -39,14 +44,5 @@ type Prettier {
 
     fixedJs.
     changes(sourceJs)
-  }
-
-  let base: Container! {
-    container.from(baseImageAddress).
-      withMountedCache("/root/.npm", cacheVolume("node-modules")).
-      withDirectory("/src", source).
-      withWorkdir("/src").
-      withEnvVariable("CI", "true").
-      withExec(["npm", "install"])
   }
 }

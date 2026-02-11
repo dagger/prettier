@@ -1,8 +1,8 @@
 {
   "name": "prettier",
-  "engineVersion": "v0.19.10",
+  "engineVersion": "v0.19.11",
   "sdk": {
-    "source": "github.com/vito/dang/dagger-sdk"
+    "source": "github.com/vito/dang/dagger-sdk@9eb282f01ed7f367f5bce96998301ce1a9df1347"
   },
   "dependencies": [
     {

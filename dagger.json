@@ -1,14 +1,14 @@
 {
   "name": "prettier",
-  "engineVersion": "v0.19.11",
+  "engineVersion": "v0.20.0",
   "sdk": {
-    "source": "github.com/vito/dang/dagger-sdk@9eb282f01ed7f367f5bce96998301ce1a9df1347"
+    "source": "github.com/vito/dang/dagger-sdk@da6ed3337a2a18b0c9a371813ef62b880e1c6f5d"
   },
   "dependencies": [
     {
       "name": "node",
       "source": "github.com/kpenfound/dag/node@main",
-      "pin": "699c6d4f6eb1b62c51d86acb68381c8af75a2536"
+      "pin": "1336005f0d341e2cfb96bc6152246dce7a49990e"
     }
   ]
 }

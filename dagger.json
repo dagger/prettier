@@ -1,7 +1,9 @@
 {
   "name": "prettier",
-  "engineVersion": "v0.20.3",
-  "sdk": "dang",
+  "engineVersion": "v0.20.6",
+  "sdk": {
+    "source": "dang"
+  },
   "dependencies": [
     {
       "name": "node",

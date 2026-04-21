@@ -2,7 +2,7 @@ type Prettier {
   """
   The source directory for the project.
   """
-  pub source: Directory!
+  pub source: Directory! @defaultPath(path: "/")
 
   """
   The base image to use.
@@ -13,11 +13,6 @@ type Prettier {
   The package manager to use.
   """
   pub packageManager: String! = "npm"
-
-  new(source: Workspace!) {
-    self.source = source.directory("/")
-    self
-  }
 
   """
   Check that if the files are formatted.

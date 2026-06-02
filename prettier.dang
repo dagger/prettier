@@ -40,20 +40,12 @@ type Prettier {
   Rewrite all processed files in place.
   """
   pub write: Changeset {
-    let fixFilter = ["**/*.js", "**/*.ts", "**/*.md", "**/*.jsx"]
-
     let fixed = nodejs(source, baseImageAddress, packageManager).base.
     withExec(["npx", "prettier", "--write", "."]).
     directory(".").
     withoutDirectory("node_modules")
 
-    let fixedJs = directory.
-    withDirectory(".", fixed, include: fixFilter)
-
-    let sourceJs = directory.
-    withDirectory(".", source.withoutDirectory("node_modules"), include: fixFilter)
-
-    fixedJs.
-    changes(sourceJs)
+    fixed.
+    changes(source.withoutDirectory("node_modules"))
   }
 }

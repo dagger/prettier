@@ -15,11 +15,11 @@ type Prettier {
   pub packageManager: String!
 
   new(
-    workspace: Workspace!,
+    ws: Workspace!,
     baseImageAddress: String! = "node:25-alpine",
     packageManager: String! = "npm",
   ) {
-    self.source = workspace.directory("/")
+    self.source = ws.directory("/")
     self.baseImageAddress = baseImageAddress
     self.packageManager = packageManager
     self

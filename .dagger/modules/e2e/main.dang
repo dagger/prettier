@@ -1,0 +1,21 @@
+"""
+End-to-end checks for the prettier toolchain.
+"""
+type E2e {
+  """
+  The git repository to format-check as an end-to-end smoke test.
+  """
+  pub repo: String! = "https://github.com/kpenfound/demo-react-app"
+
+  """
+  Run the prettier toolchain against a real-world repository.
+
+  This pulls the demo repo, exposes it as a Workspace, and runs the
+  prettier `check` against it end-to-end.
+  """
+  pub checkDemoApp: Void @check {
+    let ws = git(repo).head.tree.asWorkspace
+
+    prettier(ws).check
+  }
+}

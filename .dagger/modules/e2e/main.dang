@@ -5,17 +5,20 @@ type E2e {
   """
   The git repository to format-check as an end-to-end smoke test.
   """
-  pub repo: String! = "https://github.com/kpenfound/demo-react-app"
+  pub repo: String! = "https://github.com/dagger/hello-dagger"
 
   """
   Run the prettier toolchain against a real-world repository.
 
-  This pulls the demo repo, exposes it as a Workspace, and runs the
-  prettier `check` against it end-to-end.
+  The hello-dagger repo isn't prettier-formatted, so this first applies
+  `write` to format the workspace, then runs `check` against the
+  formatted result to exercise both ends of the toolchain.
   """
-  pub checkDemoApp: Void @check {
+  pub checkHelloDagger: Void @check {
     let ws = git(repo).head.tree.asWorkspace
 
-    prettier(ws).check
+    let formatted = prettier(ws).write.after.asWorkspace
+
+    prettier(formatted).check
   }
 }

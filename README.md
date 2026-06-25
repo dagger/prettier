@@ -32,11 +32,11 @@ The toolchain can be customized in your `dagger.json` to meet your needs:
         },
         {
           "argument": "baseImageAddress",
-          "default": "node:22"       # default: node:25-alpine; use any container image 
+          "default": "node:22"       # default: oven/bun:1.2.4-alpine; use any container image 
         },
         {
           "argument": "packageManager",
-          "default": "yarn"          # default: npm; alternatively use yarn, pnpm, or bun
+          "default": "yarn"          # default: bun; alternatively use npm, yarn, or pnpm
         }
       ]
     }

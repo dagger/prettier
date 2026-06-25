@@ -16,8 +16,8 @@ type Prettier {
 
   new(
     ws: Workspace!,
-    baseImageAddress: String! = "node:25-alpine",
-    packageManager: String! = "npm",
+    baseImageAddress: String! = "oven/bun:1.2.4-alpine",
+    packageManager: String! = "bun",
   ) {
     self.source = ws.directory("/")
     self.baseImageAddress = baseImageAddress
@@ -25,13 +25,36 @@ type Prettier {
     self
   }
 
+  pub base: Container! {
+    container.from(baseImageAddress).
+    withMountedCache("/root/.packages", cacheVolume("prettier-packages")).
+    withEnvVariable("npm_config_cache", "/root/.packages").
+    withEnvVariable("YARN_CACHE_FOLDER", "/root/.packages").
+    withEnvVariable("PNPM_HOME", "/root/.packages").
+    withEnvVariable("BUN_INSTALL_CACHE_DIR", "/root/.packages").
+    withDirectory("/src", source).
+    withWorkdir("/src").
+    withEnvVariable("CI", "true").
+    withExec([packageManager, "install"])
+  }
+
+  pub exec(args: [String!]!): Container! {
+    let x = if (packageManager == "npm" or packageManager == "bun") {
+      "x"
+    } else if (packageManager == "pnpm" or packageManager == "yarn") {
+      "dlx"
+    } else {
+      raise `invalid packageManager ${packageManager}`
+    }
+
+    base.withExec([packageManager, x] + args)
+  }
+
   """
   Check that if the files are formatted.
   """
   pub check: Void @check {
-    nodejs(source, baseImageAddress, packageManager).
-    exec("prettier", "--check", "."]).
-    sync
+    exec(["prettier", "--check", "."]).sync
 
     null
   }
@@ -40,8 +63,7 @@ type Prettier {
   Rewrite all processed files in place.
   """
   pub write: Changeset {
-    let fixed = nodejs(source, baseImageAddress, packageManager).
-    exec(["prettier", "--write", "."]).
+    let fixed = exec(["prettier", "--write", "."]).
     directory(".").
     withoutDirectory("node_modules")
 

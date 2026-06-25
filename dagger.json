@@ -3,12 +3,5 @@
   "engineVersion": "v0.20.6",
   "sdk": {
     "source": "dang"
-  },
-  "dependencies": [
-    {
-      "name": "nodejs",
-      "source": "github.com/dagger/node@exec",
-      "pin": "12e2f9c9ef14290e9b18180bf32aaab47e9ca8e2"
-    }
-  ]
+  }
 }

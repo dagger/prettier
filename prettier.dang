@@ -29,8 +29,8 @@ type Prettier {
   Check that if the files are formatted.
   """
   pub check: Void @check {
-    nodejs(source, baseImageAddress, packageManager).base.
-    withExec(["npx", "prettier", "--check", "."]).
+    nodejs(source, baseImageAddress, packageManager).
+    exec("prettier", "--check", "."]).
     sync
 
     null
@@ -40,8 +40,8 @@ type Prettier {
   Rewrite all processed files in place.
   """
   pub write: Changeset {
-    let fixed = nodejs(source, baseImageAddress, packageManager).base.
-    withExec(["npx", "prettier", "--write", "."]).
+    let fixed = nodejs(source, baseImageAddress, packageManager).
+    exec(["prettier", "--write", "."]).
     directory(".").
     withoutDirectory("node_modules")
 

@@ -7,8 +7,8 @@
   "dependencies": [
     {
       "name": "nodejs",
-      "source": "github.com/dagger/node@main",
-      "pin": "73da7e4e0169ff8075a43abfd54c7f63caf516a3"
+      "source": "github.com/dagger/node@exec",
+      "pin": "12e2f9c9ef14290e9b18180bf32aaab47e9ca8e2"
     }
   ]
 }

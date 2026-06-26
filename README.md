@@ -36,7 +36,7 @@ The toolchain can be customized in your `dagger.json` to meet your needs:
         },
         {
           "argument": "packageManager",
-          "default": "yarn"          # default: package.json packageManager, then npm
+          "default": "yarn"          # default: package.json engines, then npm
         }
       ]
     }

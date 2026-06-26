@@ -8,7 +8,7 @@
     {
       "name": "nodejs",
       "source": "github.com/dagger/node@exec",
-      "pin": "879b778c09fb4bac90ba1123d761bbdcecc3774f"
+      "pin": "094b89d904d6449abd4b4c7499eab3c55730f33e"
     }
   ]
 }

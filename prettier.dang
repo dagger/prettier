@@ -7,17 +7,17 @@ type Prettier {
   """
   The base image to use.
   """
-  pub baseImageAddress: String!
+  pub baseImageAddress: String
 
   """
   The package manager to use.
   """
-  pub packageManager: String!
+  pub packageManager: String
 
   new(
     ws: Workspace!,
-    baseImageAddress: String! = "oven/bun:1.2.4-alpine",
-    packageManager: String! = "bun",
+    baseImageAddress: String = null,
+    packageManager: String = null,
   ) {
     self.source = ws.directory("/")
     self.baseImageAddress = baseImageAddress

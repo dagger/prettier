@@ -39,7 +39,7 @@ The toolchain can be customized in your `dagger.json` to meet your needs:
       "customizations": [
         {
           "argument": "baseImageAddress",
-          "default": "node:22"       # default: node:25-alpine; use any container image 
+          "default": "node:22"       # default: node:25-alpine; use any container image
         },
         {
           "argument": "packageManager",

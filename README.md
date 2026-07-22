@@ -19,6 +19,10 @@ whole workspace is mounted — so shared configuration like a root
 you invoke `dagger` from. Run from the workspace root to cover everything,
 or from a subdirectory to scope `check` and `write` to that subtree.
 
+If the workspace root holds no `package.json`, the dependency install is
+skipped and `npx` fetches prettier on demand — a standalone prettier config
+works without a Node project.
+
 ## Customization
 
 The toolchain can be customized in your `dagger.json` to meet your needs:

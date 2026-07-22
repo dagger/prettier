@@ -11,3 +11,9 @@ source = ".dagger/modules/e2e"
 source = "github.com/dagger/dang-sdk"
 # Marker filename that skips generate when found at or above a Dang SDK module root.
 # settings.skipGenerateFilename = ""
+
+[modules.dang-sdk.as-sdk]
+name = "dang"
+
+[[modules.dang-sdk.as-sdk.modules]]
+path = "."

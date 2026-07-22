@@ -5,6 +5,11 @@ type Prettier {
   pub source: Directory!
 
   """
+  Path of the client's working directory, relative to the workspace root.
+  """
+  pub path: String!
+
+  """
   The base image to use.
   """
   pub baseImageAddress: String!
@@ -20,6 +25,7 @@ type Prettier {
     packageManager: String! = "npm",
   ) {
     self.source = ws.directory("/")
+    self.path = ws.path
     self.baseImageAddress = baseImageAddress
     self.packageManager = packageManager
     self
@@ -30,6 +36,7 @@ type Prettier {
   """
   pub check: Void @check {
     nodejs(source, baseImageAddress, packageManager).base.
+    withWorkdir("/src/" + path).
     withExec(["npx", "prettier", "--check", "."]).
     sync
 
@@ -41,8 +48,9 @@ type Prettier {
   """
   pub write: Changeset {
     let fixed = nodejs(source, baseImageAddress, packageManager).base.
+    withWorkdir("/src/" + path).
     withExec(["npx", "prettier", "--write", "."]).
-    directory(".").
+    directory("/src").
     withoutDirectory("node_modules")
 
     fixed.

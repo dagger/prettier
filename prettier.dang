@@ -50,11 +50,11 @@ type Prettier {
     let fixed = runtime.
     withWorkdir("/src/" + path).
     withExec(["npx", "prettier", "--write", "."]).
-    directory("/src").
+    directory("/src/" + path).
     withoutDirectory("node_modules")
 
     fixed.
-    changes(source.withoutDirectory("node_modules"))
+    changes(source.directory(path).withoutDirectory("node_modules"))
   }
 
   """

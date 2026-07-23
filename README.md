@@ -11,6 +11,18 @@ dagger toolchain install github.com/dagger/prettier
 - `check`: Check that if the files are formatted.
 - `write`: Rewrite all processed files in place.
 
+## Working directory awareness
+
+Functions run from your current working directory within the workspace. The
+whole workspace is mounted — so shared configuration like a root
+`.prettierrc` still resolves — but prettier itself runs from the directory
+you invoke `dagger` from. Run from the workspace root to cover everything,
+or from a subdirectory to scope `check` and `write` to that subtree.
+
+If the workspace root holds no `package.json`, the dependency install is
+skipped and `npx` fetches prettier on demand — a standalone prettier config
+works without a Node project.
+
 ## Customization
 
 The toolchain can be customized in your `dagger.json` to meet your needs:
@@ -26,13 +38,8 @@ The toolchain can be customized in your `dagger.json` to meet your needs:
       "pin": "...",
       "customizations": [
         {
-          "argument": "source",
-          "defaultPath": "/src",         # default: /; custom default path
-          "ignore": ["**/node_modules"]  # custom ignore filter
-        },
-        {
           "argument": "baseImageAddress",
-          "default": "node:22"       # default: node:25-alpine; use any container image 
+          "default": "node:22"       # default: node:25-alpine; use any container image
         },
         {
           "argument": "packageManager",

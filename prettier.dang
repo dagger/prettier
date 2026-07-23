@@ -5,6 +5,11 @@ type Prettier {
   pub source: Directory!
 
   """
+  Path of the client's working directory, relative to the workspace root.
+  """
+  pub path: String!
+
+  """
   The base image to use.
   """
   pub baseImageAddress: String!
@@ -20,6 +25,7 @@ type Prettier {
     packageManager: String! = "npm",
   ) {
     self.source = ws.directory("/")
+    self.path = ws.path
     self.baseImageAddress = baseImageAddress
     self.packageManager = packageManager
     self
@@ -29,7 +35,8 @@ type Prettier {
   Check that if the files are formatted.
   """
   pub check: Void @check {
-    nodejs(source, baseImageAddress, packageManager).base.
+    runtime.
+    withWorkdir("/src/" + path).
     withExec(["npx", "prettier", "--check", "."]).
     sync
 
@@ -40,12 +47,31 @@ type Prettier {
   Rewrite all processed files in place.
   """
   pub write: Changeset {
-    let fixed = nodejs(source, baseImageAddress, packageManager).base.
+    let fixed = runtime.
+    withWorkdir("/src/" + path).
     withExec(["npx", "prettier", "--write", "."]).
-    directory(".").
+    directory("/src").
     withoutDirectory("node_modules")
 
     fixed.
     changes(source.withoutDirectory("node_modules"))
+  }
+
+  """
+  Runtime container for prettier. When the workspace root holds no
+  package.json the dependency install is skipped and npx fetches prettier on
+  demand, so a standalone prettier config works without a Node project.
+  """
+  let runtime: Container! {
+    if (source.glob("package.json").length == 0) {
+      container.from(baseImageAddress).
+        withMountedCache("/root/.packages", cacheVolume("node-toolchain-packages")).
+        withEnvVariable("npm_config_cache", "/root/.packages").
+        withDirectory("/src", source).
+        withWorkdir("/src").
+        withEnvVariable("CI", "true")
+    } else {
+      nodejs(source, baseImageAddress, packageManager).base
+    }
   }
 }

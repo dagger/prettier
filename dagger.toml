@@ -4,13 +4,17 @@ source = ".dagger/modules/e2e"
 # The git repository to format-check as an end-to-end smoke test.
 # settings.repo = ""
 
-[modules.dang-sdk]
+[modules.dagger-dang-sdk]
 source = "github.com/dagger/dang-sdk"
-# Marker filename that skips generate when found at or above a Dang SDK module root.
-# settings.skipGenerateFilename = ""
 
-[modules.dang-sdk.as-sdk]
-name = "dang"
+[sdks.dang]
+module = "dagger-dang-sdk"
 
-[[modules.dang-sdk.as-sdk.modules]]
-path = "."
+[sdks.dang.scopes."."]
+clients = ["github.com/dagger/node"]
+is-module = true
+name = "prettier"
+
+[sdks.dang.scopes.".dagger/modules/e2e"]
+clients = ["./."]
+is-module = true

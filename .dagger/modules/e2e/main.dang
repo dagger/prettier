@@ -73,20 +73,28 @@ type E2e {
 
   """
   Projects are keyed by the directories holding a Prettier config at or below
-  the working directory, plus the enclosing one, as workspace-root paths.
+  the working directory, plus the enclosing one when the working directory is
+  inside a project, as workspace-root paths.
   """
   keysCheck(ws: Workspace!): Void @check {
+    # Outside any project: the projects below.
     let keys = prettier.projects(ws).keys
     assert(
       keys == [formatted, nested, unformatted],
       "projects from the root: " + keys.join(", "),
     )
+    let fromTestdata = prettier.projects(ws.withWorkdir("testdata")).keys
+    assert(fromTestdata == keys, "projects from a directory in no project: " + fromTestdata.join(", "))
 
+    # At a project root: that project and the ones below it, no ancestors.
     let below = prettier.projects(ws.withWorkdir(formatted)).keys
     assert(below == [formatted, nested], "projects from a project root: " + below.join(", "))
 
+    # Inside a project's subdirectory: exactly the enclosing project.
     let inside = prettier.projects(ws.withWorkdir(formatted + "/src")).keys
     assert(inside == [formatted], "projects from inside a project: " + inside.join(", "))
+    let insideOther = prettier.projects(ws.withWorkdir(unformatted + "/src")).keys
+    assert(insideOther == [unformatted], "projects from inside another project: " + insideOther.join(", "))
 
     let fromNested = prettier.projects(ws.withWorkdir(nested)).keys
     assert(fromNested == [nested], "projects from a nested project: " + fromNested.join(", "))
@@ -101,6 +109,8 @@ type E2e {
       .asWorkspace
     let found = prettier.projects(synthetic).keys
     assert(found == ["a", "b", "c"], "synthetic projects: " + found.join(", "))
+    let none = prettier.projects(synthetic.withWorkdir("d")).keys
+    assert(none.length == 0, "projects from a directory with none: " + none.join(", "))
     null
   }
 

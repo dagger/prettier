@@ -5,7 +5,7 @@ source = ".dagger/modules/e2e"
 # settings.repo = ""
 
 [modules.dagger-dang-sdk]
-source = "github.com/dagger/dang-sdk"
+source = "github.com/dagger/dang-sdk@collections"
 
 [sdks.dang]
 module = "dagger-dang-sdk"

@@ -1,14 +1,9 @@
+"""
+Check and fix formatting with Prettier.
+
+https://prettier.io
+"""
 type Prettier {
-  """
-  The source directory for the project.
-  """
-  source: Directory!
-
-  """
-  Path of the client's working directory, relative to the workspace root.
-  """
-  path: String!
-
   """
   The base image to use.
   """
@@ -20,59 +15,343 @@ type Prettier {
   packageManager: String!
 
   new(
-    ws: Workspace!,
+    """
+    Base image for Prettier containers, e.g. "node:22".
+    """
     baseImageAddress: String! = "node:25-alpine",
+    """
+    Package manager that installs dependencies: npm, yarn, pnpm or bun.
+    """
     packageManager: String! = "npm",
   ) {
-    self.source = ws.directory("/")
-    self.path = ws.cwd
     self.baseImageAddress = baseImageAddress
     self.packageManager = packageManager
     self
   }
 
   """
-  Check that if the files are formatted.
+  Prettier projects at or below the working directory, keyed by config root.
   """
-  check: Void @check {
-    runtime
-      .withWorkdir("/src/" + path)
-      .withExec(["npx", "prettier", "--check", "."])
-      .sync
+  projects(ws: Workspace!): PrettierProjects! {
+    PrettierProjects(paths: sorted(configRoots(ws, ".").uniq), tool: self)
+  }
 
+  """
+  The Prettier project containing a workspace path.
+  """
+  project(ws: Workspace!, path: String!): PrettierProject! {
+    let start = resolvePath(ws, path)
+    let found = configRoots(ws, path).filter { dir => contains(dir, start) }
+    if (found.length == 0) {
+      raise "no Prettier config found containing path: " + path
+    } else {
+      # The nearest one is the deepest.
+      prettierProject(
+        found.reduce(".") { best, dir =>
+          if (depth(dir) > depth(best)) { dir } else { best }
+        },
+      )
+    }
+  }
+
+  let depth(dir: String!): Int! {
+    if (dir == ".") { 0 } else { dir.split("/").length }
+  }
+
+  let prettierProject(path: String!): PrettierProject! {
+    PrettierProject(path: path, tool: self)
+  }
+
+  """
+  File names that mark a Prettier project root.
+  """
+  let configFiles: [String!]! = [
+    ".prettierrc",
+    ".prettierrc.json",
+    ".prettierrc.json5",
+    ".prettierrc.yaml",
+    ".prettierrc.yml",
+    ".prettierrc.toml",
+    ".prettierrc.js",
+    ".prettierrc.mjs",
+    ".prettierrc.cjs",
+    ".prettierrc.ts",
+    ".prettierrc.mts",
+    ".prettierrc.cts",
+    "prettier.config.js",
+    "prettier.config.mjs",
+    "prettier.config.cjs",
+    "prettier.config.ts",
+    "prettier.config.mts",
+    "prettier.config.cts",
+  ]
+
+  """
+  Every directory holding a Prettier config at or below start, plus the
+  nearest enclosing one when start holds none, as workspace-root-relative
+  paths. start is read like any path argument: relative to the working
+  directory, or to the workspace root when absolute. node_modules is skipped.
+  """
+  let configRoots(ws: Workspace!, start: String!): [String!]! {
+    ws
+      .findRoots(start: start, markers: configFiles, exclude: ["**/node_modules/**"])
+      .map { dir => workspaceRootPath(ws, dir) }
+  }
+
+  """
+  Resolve a path relative to the working directory, as findRoots returns
+  them, into a workspace-root-relative one.
+  """
+  let workspaceRootPath(ws: Workspace!, cwdRelPath: String!): String! {
+    let segments = cwdRelPath.split("/").filter { s => s != "" and s != "." }
+    let up = segments.filter { s => s == ".." }.length
+    let down = segments.filter { s => s != ".." }
+    let resolved = ws.cwd.split("/").filter { s => s != "" }.dropLast(up) + down
+    if (resolved.length == 0) { "." } else { resolved.join("/") }
+  }
+
+  """
+  Resolve a path argument into a workspace-root-relative path.
+  """
+  let resolvePath(ws: Workspace!, path: String!): String! {
+    if (path.hasPrefix("/")) {
+      normalize(path)
+    } else {
+      workspaceRootPath(ws, path)
+    }
+  }
+
+  """
+  Strip leading and trailing slashes; the workspace root is ".".
+  """
+  let normalize(path: String!): String! {
+    let p = path.trimPrefix("/").trimSuffix("/")
+    if (p == "") { "." } else { p }
+  }
+
+  """
+  Whether path is dir or below it.
+  """
+  let contains(dir: String!, path: String!): Boolean! {
+    dir == "." or path == dir or path.hasPrefix(dir + "/")
+  }
+
+  """
+  path relative to dir, which contains it.
+  """
+  let relativeTo(dir: String!, path: String!): String! {
+    if (path == dir) {
+      "."
+    } else if (dir == ".") {
+      path
+    } else {
+      path.trimPrefix(dir + "/")
+    }
+  }
+
+  """
+  Keys feed cache keys and batch arguments, so give them a stable order.
+  """
+  let sorted(items: [String!]!): [String!]! {
+    let empty: [String!]! = []
+    items.reduce(empty) { acc, item =>
+      acc.takeWhile { x => x <= item } + [item] + acc.dropWhile { x => x <= item }
+    }
+  }
+}
+
+"""
+Prettier projects in a workspace, keyed by the directory holding their config.
+"""
+type PrettierProjects @collection {
+  """
+  Project root paths.
+  """
+  paths: [String!]! @keys
+
+  let tool: Prettier!
+
+  """
+  The Prettier project rooted at path.
+  """
+  project(path: String!): PrettierProject! @get {
+    tool.prettierProject(path)
+  }
+
+  """
+  Check formatting of the selected projects.
+  """
+  formatCheck(ws: Workspace!): Void @check {
+    # A selection over a list evaluates its elements concurrently, so every
+    # project is checked in parallel and every failure is reported.
+    let failures = paths.map { p => project(p) }.{{path, failure: checkFailure(ws)}}
+      .filter { result => result.failure != null }
+    if (failures.length > 0) {
+      raise "Prettier found issues in " + toString(failures.length) + " project(s):\n"
+        + failures.map { result => "- " + result.path + ":\n" + (result.failure ?? "") }.join("\n")
+    }
     null
   }
 
   """
-  Rewrite all processed files in place.
+  Format the selected projects.
   """
-  write: Changeset! {
-    let fixed = runtime
-      .withWorkdir("/src/" + path)
-      .withExec(["npx", "prettier", "--write", "."])
-      .directory("/src")
-      .withoutDirectory("node_modules")
+  format(ws: Workspace!): Changeset! {
+    let projects = paths.map { p => project(p) }
+    let failures = projects.{{path, failure: formatFailure(ws)}}
+      .filter { result => result.failure != null }
+    if (failures.length > 0) {
+      raise "Prettier failed in " + toString(failures.length) + " project(s):\n"
+        + failures.map { result => "- " + result.path + ":\n" + (result.failure ?? "") }.join("\n")
+    }
 
-    fixed
-      .changes(source.withoutDirectory("node_modules"))
+    # Each project contributes only its own files (nested projects are cut
+    # out), so the layers are disjoint and one diff covers the selection.
+    let before = projects.reduce(directory) { acc, p =>
+      acc.withDirectory(".", p.placed(ws, p.runner(ws)))
+    }
+    let after = projects.reduce(directory) { acc, p =>
+      acc.withDirectory(".", p.placed(ws, p.formatExec(ws)))
+    }
+    after.changes(before)
+  }
+}
+
+"""
+A Prettier project: a directory holding a Prettier config, and everything
+below it except nested projects.
+"""
+type PrettierProject {
+  """
+  Project root, relative to the workspace.
+  """
+  path: String!
+
+  let tool: Prettier!
+
+  """
+  Check formatting of this project.
+  """
+  formatCheck(ws: Workspace!): Void @check {
+    let failure = checkFailure(ws)
+    if (failure != null) {
+      raise failure ?? ""
+    }
+    null
   }
 
   """
-  Runtime container for prettier. When the workspace root holds no
-  package.json the dependency install is skipped and npx fetches prettier on
-  demand, so a standalone prettier config works without a Node project.
+  Format this project.
   """
-  let runtime: Container! {
-    if (source.glob("package.json").length == 0) {
+  format(ws: Workspace!): Changeset! {
+    let failure = formatFailure(ws)
+    if (failure != null) {
+      raise failure ?? ""
+    }
+    # Diff against the container before Prettier ran rather than the
+    # workspace, so a lockfile written by the dependency install stays out.
+    placed(ws, formatExec(ws)).changes(placed(ws, runner(ws)))
+  }
+
+  """
+  Prettier's report for this project, or null when it is formatted.
+  """
+  let checkFailure(ws: Workspace!): String {
+    failureOf(
+      runner(ws).withExec(
+        ["npx", "prettier", "--check", "."] + excludeNested(ws),
+        expect: ReturnType.ANY,
+      ),
+    )
+  }
+
+  """
+  Prettier's errors from formatting this project, or null when it ran cleanly.
+  """
+  let formatFailure(ws: Workspace!): String {
+    failureOf(formatExec(ws))
+  }
+
+  let formatExec(ws: Workspace!): Container! {
+    runner(ws).withExec(
+      ["npx", "prettier", "--write", "."] + excludeNested(ws),
+      expect: ReturnType.ANY,
+    )
+  }
+
+  let failureOf(ran: Container!): String {
+    if (ran.exitCode == 0) { null } else { ran.stderr.trim(" \n") }
+  }
+
+  """
+  Nested projects, relative to this one. Each is checked on its own, with its
+  own config and ignore file, so this project leaves them alone.
+  """
+  let nested(ws: Workspace!): [String!]! {
+    tool
+      .configRoots(ws, "/" + path)
+      .filter { dir => dir != path and tool.contains(path, dir) }
+      .map { dir => tool.relativeTo(path, dir) }
+  }
+
+  let excludeNested(ws: Workspace!): [String!]! {
+    nested(ws).map { dir => "!" + dir + "/**" }
+  }
+
+  """
+  Directory holding the nearest package.json at or above this project, or
+  null when there is none.
+  """
+  let packageRoot(ws: Workspace!): String {
+    let found = ws.findUp("package.json", "/" + path)
+    if (found == null) {
+      null
+    } else {
+      tool.normalize((found ?? "").trimSuffix("package.json"))
+    }
+  }
+
+  """
+  Container that runs Prettier, with this project as the working directory.
+  With a package.json at or above the project, its dependencies are installed
+  so the project's own Prettier and plugins are used; otherwise npx fetches
+  Prettier on demand.
+  """
+  let runner(ws: Workspace!): Container! {
+    let pkg = packageRoot(ws)
+    let root = pkg ?? path
+    let source = ws.directory("/" + root, exclude: ["**/node_modules"], gitignore: true)
+    let ctr = if (pkg == null) {
       container
-        .from(baseImageAddress)
+        .from(tool.baseImageAddress)
         .withMountedCache("/root/.packages", cacheVolume("node-toolchain-packages"))
         .withEnvVariable("npm_config_cache", "/root/.packages")
         .withDirectory("/src", source)
-        .withWorkdir("/src")
         .withEnvVariable("CI", "true")
     } else {
-      nodejs(source, baseImageAddress, packageManager).base
+      nodejs(source, tool.baseImageAddress, tool.packageManager).base
+    }
+    let dir = tool.relativeTo(root, path)
+    # Plain output, so reports read cleanly in error messages.
+    ctr
+      .withEnvVariable("NO_COLOR", "1")
+      .withWorkdir(if (dir == ".") { "/src" } else { "/src/" + dir })
+  }
+
+  """
+  The part of this project's tree in ctr that the caller can change, rooted at
+  the caller's working directory. The CLI applies a changeset from where the
+  caller stands, so a project below it is placed at its relative path, and an
+  enclosing project contributes only the caller's subtree.
+  """
+  let placed(ws: Workspace!, ctr: Container!): Directory! {
+    let cwd = tool.normalize(ws.cwd)
+    let own = nested(ws).reduce(ctr.directory(".")) { dir, sub => dir.withoutDirectory(sub) }
+    let files = directory.withDirectory(".", own, exclude: ["**/node_modules"])
+    if (tool.contains(cwd, path)) {
+      directory.withDirectory(tool.relativeTo(cwd, path), files)
+    } else {
+      files.directory(tool.relativeTo(path, cwd))
     }
   }
 }

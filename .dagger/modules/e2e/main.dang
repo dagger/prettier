@@ -1,24 +1,270 @@
 """
 End-to-end checks for the prettier toolchain.
+
+The fixtures live under `testdata/`: `formatted` is formatted and holds a
+nested project with its own config and ignore file, and `unformatted` is
+unformatted on purpose and installs its own Prettier from a package.json.
 """
 type E2e {
   """
-  The git repository to format-check as an end-to-end smoke test.
+  The git repository to format as an end-to-end smoke test.
   """
   repo: String! = "https://github.com/dagger/hello-dagger"
+
+  let formatted: String! = "testdata/formatted"
+  let nested: String! = "testdata/formatted/nested"
+  let unformatted: String! = "testdata/unformatted"
+
+  let assert(condition: Boolean!, message: String!): Void {
+    if (condition == false) { raise message }
+    null
+  }
+
+  """
+  Run a check, raising its failure. A check called through a dependency comes
+  back as a Check that has not run.
+  """
+  let run(check: Check!): Void {
+    # Check.error is not null for a passing check when read from Dang, so ask
+    # pass first and read the message only on failure.
+    if (check.pass == false) {
+      raise check.error.message ?? "check failed"
+    }
+    null
+  }
+
+  """
+  The failure message of a check that should fail.
+  """
+  let failure(check: Check!): String! {
+    { run(check); "unexpected success" } rescue {
+      err: Error => err.message
+    }
+  }
+
+  let changed(changes: Changeset!): [String!]! {
+    changes.addedPaths + changes.modifiedPaths + changes.removedPaths
+  }
 
   """
   Run the prettier toolchain against a real-world repository.
 
-  The hello-dagger repo isn't prettier-formatted, so this first applies
-  `write` to format the workspace, then runs `check` against the
-  formatted result to exercise both ends of the toolchain.
+  The hello-dagger repo isn't prettier-formatted, so this first formats the
+  workspace, then checks the formatted result to exercise both ends of the
+  toolchain.
   """
   checkHelloDagger: Void @check {
     let ws = git(repo).head.tree.asWorkspace
+    let projects = prettier.projects(ws)
+    assert(projects.keys == ["."], "hello-dagger projects: " + projects.keys.join(", "))
 
-    let formatted = prettier(ws).write.after.asWorkspace
+    assert(failure(projects.batch.formatCheck(ws)).contains("[warn]"), "unformatted hello-dagger passed")
 
-    prettier(formatted).check
+    let changes = projects.batch.format(ws)
+    assert(changes.modifiedPaths.length > 0, "formatting hello-dagger changed nothing")
+    assert(
+      changes.addedPaths.length == 0 and changes.removedPaths.length == 0,
+      "formatting added or removed files: " + (changes.addedPaths + changes.removedPaths).join(", "),
+    )
+
+    let result = changes.after.asWorkspace
+    run(prettier.projects(result).batch.formatCheck(result))
+  }
+
+  """
+  Projects are keyed by the directories holding a Prettier config at or below
+  the working directory, plus the enclosing one, as workspace-root paths.
+  """
+  keysCheck(ws: Workspace!): Void @check {
+    let keys = prettier.projects(ws).keys
+    assert(
+      keys == [formatted, nested, unformatted],
+      "projects from the root: " + keys.join(", "),
+    )
+
+    let below = prettier.projects(ws.withWorkdir(formatted)).keys
+    assert(below == [formatted, nested], "projects from a project root: " + below.join(", "))
+
+    let inside = prettier.projects(ws.withWorkdir(formatted + "/src")).keys
+    assert(inside == [formatted], "projects from inside a project: " + inside.join(", "))
+
+    let fromNested = prettier.projects(ws.withWorkdir(nested)).keys
+    assert(fromNested == [nested], "projects from a nested project: " + fromNested.join(", "))
+
+    # Every Prettier config spelling marks a root, and node_modules is skipped.
+    let synthetic = directory
+      .withNewFile("b/.prettierrc.yml", "semi: false\n")
+      .withNewFile("a/prettier.config.mjs", "export default {};\n")
+      .withNewFile("c/.prettierrc", "{}\n")
+      .withNewFile("c/node_modules/dep/.prettierrc.json", "{}\n")
+      .withNewFile("d/package.json", "{}\n")
+      .asWorkspace
+    let found = prettier.projects(synthetic).keys
+    assert(found == ["a", "b", "c"], "synthetic projects: " + found.join(", "))
+    null
+  }
+
+  """
+  get and list build the projects at their keys; subset keeps parent order,
+  rejects unknown and duplicate keys, and narrows what get accepts and what
+  the batches run.
+  """
+  collectionCheck(ws: Workspace!): Void @check {
+    let projects = prettier.projects(ws)
+    assert(projects.get(key: nested).path == nested, "get did not return the project at its key")
+    assert(
+      projects.list.{{path}}.map { p => p.path } == projects.keys,
+      "list did not return one project per key, in key order",
+    )
+
+    let pair = projects.subset(keys: [nested, formatted])
+    assert(pair.keys == [formatted, nested], "subset did not keep parent order: " + pair.keys.join(", "))
+
+    # The unformatted fixture is in the collection but outside the subset.
+    run(pair.batch.formatCheck(ws))
+    let clean = pair.batch.format(ws)
+    assert(clean.isEmpty, "formatting formatted projects changed: " + changed(clean).join(", "))
+
+    let mixed = projects.subset(keys: [formatted, unformatted]).batch.format(ws)
+    assert(
+      changed(mixed) == [unformatted + "/index.js", unformatted + "/src/util.js"],
+      "formatting a mixed subset changed: " + changed(mixed).join(", "),
+    )
+
+    let outside = { pair.get(key: unformatted).path } rescue {
+      err: Error => "rejected"
+    }
+    assert(outside == "rejected", "get accepted a key outside the subset")
+
+    let unknown = { projects.subset(keys: ["no/such/project"]).keys.join(","); "accepted" } rescue {
+      err: Error => "rejected"
+    }
+    assert(unknown == "rejected", "subset accepted an unknown key")
+
+    let duplicate = {
+      projects.subset(keys: [formatted, formatted]).keys.join(",")
+      "accepted"
+    } rescue {
+      err: Error => "rejected"
+    }
+    assert(duplicate == "rejected", "subset accepted a duplicate key")
+
+    let none = projects.subset(keys: [])
+    assert(none.keys.length == 0, "empty subset kept keys: " + none.keys.join(", "))
+    run(none.batch.formatCheck(ws))
+    assert(none.batch.format(ws).isEmpty, "empty subset changed files")
+    null
+  }
+
+  """
+  A lookup by path finds the project containing it.
+  """
+  lookupCheck(ws: Workspace!): Void @check {
+    assert(prettier.project(ws, formatted).path == formatted, "lookup of a project root")
+    assert(prettier.project(ws, formatted + "/src").path == formatted, "lookup inside a project")
+    assert(prettier.project(ws, nested).path == nested, "lookup of a nested project")
+    assert(prettier.project(ws, "/" + nested).path == nested, "lookup of an absolute path")
+    assert(
+      prettier.project(ws.withWorkdir(unformatted + "/src"), ".").path == unformatted,
+      "lookup relative to the working directory",
+    )
+    let missing = { prettier.project(ws, "testdata").path } rescue {
+      err: Error => err.message
+    }
+    assert(missing.contains("no Prettier config found"), "missing project did not fail clearly: " + missing)
+    null
+  }
+
+  """
+  A project leaves its nested projects to their own config and ignore file,
+  so nothing is formatted twice.
+  """
+  nestedCheck(ws: Workspace!): Void @check {
+    # nested/generated.js is a template Prettier cannot parse, ignored by
+    # nested/.prettierignore, which Prettier reads only when run from the
+    # nested project: the parent fails unless it leaves the nested one alone.
+    let projects = prettier.projects(ws)
+    run(projects.get(key: formatted).formatCheck(ws))
+    run(projects.get(key: nested).formatCheck(ws))
+    let parent = projects.get(key: formatted).format(ws)
+    assert(parent.isEmpty, "formatting the parent touched its nested project: " + changed(parent).join(", "))
+    let child = projects.get(key: nested).format(ws)
+    assert(child.isEmpty, "formatting the nested project changed: " + changed(child).join(", "))
+    null
+  }
+
+  """
+  An unformatted project fails its own check and the batch alike. Formatting
+  it changes only its source files, rooted at the working directory; an
+  enclosing project contributes only the working directory's subtree.
+  """
+  unformattedCheck(ws: Workspace!): Void @check {
+    let projects = prettier.projects(ws)
+    let own = failure(projects.get(key: unformatted).formatCheck(ws))
+    assert(own.contains("[warn] index.js"), "the unformatted project passed: " + own)
+    let batch = failure(
+      projects.subset(keys: [formatted, unformatted]).batch.formatCheck(ws),
+    )
+    assert(batch.contains("- " + unformatted + ":"), "the batch did not name the failing project: " + batch)
+    assert(batch.contains("- " + formatted + ":") == false, "the batch blamed a formatted project: " + batch)
+
+    # The package.json install writes a lockfile; only Prettier's edits come
+    # back.
+    let changes = projects.get(key: unformatted).format(ws)
+    assert(
+      changed(changes) == [unformatted + "/index.js", unformatted + "/src/util.js"],
+      "formatting from the root changed: " + changed(changes).join(", "),
+    )
+    assert(
+      changes.modifiedPaths.length == 2,
+      "formatting added or removed files: " + changed(changes).join(", "),
+    )
+    let contents = changes.after.file(unformatted + "/index.js").contents
+    assert(contents == "export const greeting = { hello: \"world\" };\n", "formatted file: " + contents)
+
+    let inside = ws.withWorkdir(unformatted)
+    let local = prettier.projects(inside).get(key: unformatted).format(inside)
+    assert(changed(local) == ["index.js", "src/util.js"], "formatting from the project changed: " + changed(local).join(", "))
+
+    let below = ws.withWorkdir(unformatted + "/src")
+    let enclosing = prettier.projects(below).get(key: unformatted).format(below)
+    assert(changed(enclosing) == ["util.js"], "formatting from inside the project changed: " + changed(enclosing).join(", "))
+    null
+  }
+
+  """
+  Prettier errors fail the check and formatting, and the batches report
+  every failing project.
+  """
+  failureCheck(ws: Workspace!): Void @check {
+    let broken = directory
+      .withNewFile("a/.prettierrc", "{}\n")
+      .withNewFile("a/index.js", "const = ;\n")
+      .withNewFile("b/.prettierrc", "{}\n")
+      .withNewFile("b/index.js", "let (\n")
+      .withNewFile("c/.prettierrc", "{}\n")
+      .withNewFile("c/index.js", "export const ok = 1;\n")
+      .asWorkspace
+    let projects = prettier.projects(broken)
+
+    let one = { projects.get(key: "a").format(broken).isEmpty; "unexpected success" } rescue {
+      err: Error => err.message
+    }
+    assert(one.contains("SyntaxError"), "a syntax error did not fail formatting: " + one)
+
+    let all = { projects.batch.format(broken).isEmpty; "unexpected success" } rescue {
+      err: Error => err.message
+    }
+    assert(
+      all.contains("- a:") and all.contains("- b:") and all.contains("- c:") == false,
+      "the format batch did not report exactly the failing projects: " + all,
+    )
+
+    let checked = failure(projects.batch.formatCheck(broken))
+    assert(
+      checked.contains("- a:") and checked.contains("- b:") and checked.contains("- c:") == false,
+      "the check batch did not report exactly the failing projects: " + checked,
+    )
+    null
   }
 }

@@ -2,22 +2,22 @@ type Prettier {
   """
   The source directory for the project.
   """
-  pub source: Directory!
+  source: Directory!
 
   """
   Path of the client's working directory, relative to the workspace root.
   """
-  pub path: String!
+  path: String!
 
   """
   The base image to use.
   """
-  pub baseImageAddress: String!
+  baseImageAddress: String!
 
   """
   The package manager to use.
   """
-  pub packageManager: String!
+  packageManager: String!
 
   new(
     ws: Workspace!,
@@ -25,7 +25,7 @@ type Prettier {
     packageManager: String! = "npm",
   ) {
     self.source = ws.directory("/")
-    self.path = ws.path
+    self.path = ws.cwd
     self.baseImageAddress = baseImageAddress
     self.packageManager = packageManager
     self
@@ -34,11 +34,11 @@ type Prettier {
   """
   Check that if the files are formatted.
   """
-  pub check: Void @check {
-    runtime.
-    withWorkdir("/src/" + path).
-    withExec(["npx", "prettier", "--check", "."]).
-    sync
+  check: Void @check {
+    runtime
+      .withWorkdir("/src/" + path)
+      .withExec(["npx", "prettier", "--check", "."])
+      .sync
 
     null
   }
@@ -46,15 +46,15 @@ type Prettier {
   """
   Rewrite all processed files in place.
   """
-  pub write: Changeset {
-    let fixed = runtime.
-    withWorkdir("/src/" + path).
-    withExec(["npx", "prettier", "--write", "."]).
-    directory("/src").
-    withoutDirectory("node_modules")
+  write: Changeset! {
+    let fixed = runtime
+      .withWorkdir("/src/" + path)
+      .withExec(["npx", "prettier", "--write", "."])
+      .directory("/src")
+      .withoutDirectory("node_modules")
 
-    fixed.
-    changes(source.withoutDirectory("node_modules"))
+    fixed
+      .changes(source.withoutDirectory("node_modules"))
   }
 
   """
@@ -64,12 +64,13 @@ type Prettier {
   """
   let runtime: Container! {
     if (source.glob("package.json").length == 0) {
-      container.from(baseImageAddress).
-        withMountedCache("/root/.packages", cacheVolume("node-toolchain-packages")).
-        withEnvVariable("npm_config_cache", "/root/.packages").
-        withDirectory("/src", source).
-        withWorkdir("/src").
-        withEnvVariable("CI", "true")
+      container
+        .from(baseImageAddress)
+        .withMountedCache("/root/.packages", cacheVolume("node-toolchain-packages"))
+        .withEnvVariable("npm_config_cache", "/root/.packages")
+        .withDirectory("/src", source)
+        .withWorkdir("/src")
+        .withEnvVariable("CI", "true")
     } else {
       nodejs(source, baseImageAddress, packageManager).base
     }

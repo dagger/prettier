@@ -4,6 +4,8 @@ End-to-end checks for the prettier toolchain.
 The fixtures live under `testdata/`: `formatted` is formatted and holds a
 nested project with its own config and ignore file, and `unformatted` is
 unformatted on purpose and installs its own Prettier from a package.json.
+`pnpm-workspace` is a pnpm workspace whose member package `packages/app` is a
+project and takes Prettier from the workspace catalog.
 """
 type E2e {
   """
@@ -14,6 +16,7 @@ type E2e {
   let formatted: String! = "testdata/formatted"
   let nested: String! = "testdata/formatted/nested"
   let unformatted: String! = "testdata/unformatted"
+  let pnpmApp: String! = "testdata/pnpm-workspace/packages/app"
 
   let assert(condition: Boolean!, message: String!): Void {
     if (condition == false) { raise message }
@@ -80,7 +83,7 @@ type E2e {
     # Outside any project: the projects below.
     let keys = prettier.projects(ws).keys
     assert(
-      keys == [formatted, nested, unformatted],
+      keys == [formatted, nested, pnpmApp, unformatted],
       "projects from the root: " + keys.join(", "),
     )
     let fromTestdata = prettier.projects(ws.withWorkdir("testdata")).keys
@@ -274,6 +277,100 @@ type E2e {
     assert(
       checked.contains("- a:") and checked.contains("- b:") and checked.contains("- c:") == false,
       "the check batch did not report exactly the failing projects: " + checked,
+    )
+    null
+  }
+
+  """
+  A project inside a pnpm workspace installs at the workspace root, with the
+  package manager its package.json names, so `catalog:` resolves, and runs
+  the Prettier installed there. An explicit package manager still wins.
+  """
+  workspaceInstallCheck(ws: Workspace!): Void @check {
+    # Installing in packages/app alone fails: npm and pnpm both reject
+    # `catalog:` outside the workspace.
+    run(prettier.projects(ws).get(key: pnpmApp).formatCheck(ws))
+    assert(prettier.projects(ws).get(key: pnpmApp).format(ws).isEmpty, "formatting the pnpm project changed files")
+
+    let npm = failure(
+      prettier(packageManager: "npm").projects(ws).get(key: pnpmApp).formatCheck(ws),
+    )
+    assert(
+      npm.contains("install failed (npm install, exit"),
+      "an explicit npm did not install at the workspace root: " + npm,
+    )
+    null
+  }
+
+  """
+  A batch names every failing project and the step that failed: the install,
+  a missing Prettier, or Prettier itself.
+  """
+  installFailureCheck(ws: Workspace!): Void @check {
+    let broken = directory
+      .withNewFile("a/.prettierrc", "{}\n")
+      .withNewFile("a/index.js", "export const a = 1;\n")
+      .withNewFile(
+        "a/package.json",
+        "{\"private\": true, \"devDependencies\": {\"@dagger-e2e-missing/nope\": \"1.0.0\"}}\n",
+      )
+      .withNewFile("b/.prettierrc", "{}\n")
+      .withNewFile("b/index.js", "export const b={b:1}\n")
+      .withNewFile("c/.prettierrc", "{}\n")
+      .withNewFile("c/index.js", "export const c = 1;\n")
+      .withNewFile("c/package.json", "{\"private\": true}\n")
+      .withNewFile("d/.prettierrc", "{}\n")
+      .withNewFile("d/index.js", "export const d = 1;\n")
+      .asWorkspace
+    let message = failure(prettier.projects(broken).batch.formatCheck(broken))
+    assert(message.contains("in 3 project(s)"), "the batch did not count the failures: " + message)
+    assert(message.contains("- a: install failed (npm install, exit"), "the install failure was not named: " + message)
+    assert(message.contains("- b: prettier --check failed (exit 1)"), "the formatting failure was not named: " + message)
+    assert(message.contains("[warn] index.js"), "Prettier's report was lost: " + message)
+    assert(message.contains("- c: prettier is not installed"), "a missing Prettier was not named: " + message)
+    assert(message.contains("- d:") == false, "a passing project was blamed: " + message)
+
+    # The item check names its step too.
+    let own = failure(
+      prettier.projects(broken).get(key: "c").formatCheck(broken),
+    )
+    assert(
+      own.contains("prettier is not installed: add it to the devDependencies of c/package.json"),
+      own,
+    )
+    null
+  }
+
+  """
+  installFlags reach the install command, and environment reaches Prettier.
+  """
+  settingsCheck(ws: Workspace!): Void @check {
+    let scripted = directory
+      .withNewFile("p/.prettierrc", "{}\n")
+      .withNewFile("p/index.js", "export const p = 1;\n")
+      .withNewFile(
+        "p/package.json",
+        "{\n  \"private\": true,\n  \"scripts\": {\n    \"postinstall\": \"exit 3\"\n  },\n  \"devDependencies\": {\n    \"prettier\": \"3.6.2\"\n  }\n}\n",
+      )
+      .asWorkspace
+    let failed = failure(
+      prettier.projects(scripted).get(key: "p").formatCheck(scripted),
+    )
+    assert(failed.contains("install failed (npm install, exit"), "the failing postinstall script did not run: " + failed)
+    run(
+      prettier(installFlags: ["--ignore-scripts"]).projects(scripted).get(key: "p").formatCheck(scripted),
+    )
+
+    let configured = directory
+      .withNewFile("e/prettier.config.cjs", "module.exports = { semi: process.env.PRETTIER_SEMI !== \"false\" }\n")
+      .withNewFile("e/index.js", "export const e = 1\n")
+      .asWorkspace
+    let semi = failure(
+      prettier.projects(configured).get(key: "e").formatCheck(configured),
+    )
+    assert(semi.contains("[warn] index.js"), "the config did not default to semicolons: " + semi)
+    run(
+      prettier(environment: ["PRETTIER_SEMI=false"]).projects(configured).get(key: "e").formatCheck(configured),
     )
     null
   }

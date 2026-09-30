@@ -10,9 +10,19 @@ type Prettier {
   baseImageAddress: String!
 
   """
-  The package manager to use.
+  Package manager that installs dependencies. Empty detects it per project.
   """
   packageManager: String!
+
+  """
+  Extra arguments for the install command.
+  """
+  installFlags: [String!]!
+
+  """
+  Environment variables for Prettier, as KEY=VALUE.
+  """
+  environment: [String!]!
 
   new(
     """
@@ -21,11 +31,23 @@ type Prettier {
     baseImageAddress: String! = "node:25-alpine",
     """
     Package manager that installs dependencies: npm, yarn, pnpm or bun.
+    Empty detects it from package.json's packageManager field, else the
+    lockfile, else npm.
     """
-    packageManager: String! = "npm",
+    packageManager: String! = "",
+    """
+    Extra arguments for the install command, e.g. ["--ignore-scripts"].
+    """
+    installFlags: [String!]! = [],
+    """
+    Environment variables for Prettier, as KEY=VALUE.
+    """
+    environment: [String!]! = [],
   ) {
     self.baseImageAddress = baseImageAddress
     self.packageManager = packageManager
+    self.installFlags = installFlags
+    self.environment = environment
     self
   }
 
@@ -150,6 +172,87 @@ type Prettier {
   }
 
   """
+  Directory of a workspace path returned by findUp, or null.
+  """
+  let dirOf(found: String): String {
+    if (found == null) {
+      null
+    } else {
+      normalize((found ?? "").split("/").dropLast(1).join("/"))
+    }
+  }
+
+  """
+  The deepest, so nearest, of the given directories on one path, or null.
+  """
+  let nearest(dirs: [String]!): String {
+    let none: String = null
+    dirs.reduce(none) { best, dir =>
+      if (dir == null) {
+        best
+      } else if (best == null) {
+        dir
+      } else if (depth(dir ?? ".") > depth(best ?? ".")) {
+        dir
+      } else {
+        best
+      }
+    }
+  }
+
+  """
+  Workspace-root path of name inside dir.
+  """
+  let join(dir: String!, name: String!): String! {
+    if (dir == ".") { name } else { dir + "/" + name }
+  }
+
+  """
+  Node container with every package manager's cache on a volume, corepack
+  enabled for pnpm and yarn, and browser downloads and git hooks switched off:
+  Prettier needs none of them.
+  """
+  let nodeBase(pm: String!): Container! {
+    let base = container
+      .from(baseImageAddress)
+      .withMountedCache("/root/.npm", cacheVolume("npm-cache"))
+      .withEnvVariable("npm_config_cache", "/root/.npm")
+      .withMountedCache("/root/.yarn-cache", cacheVolume("yarn-cache"))
+      .withEnvVariable("YARN_CACHE_FOLDER", "/root/.yarn-cache")
+      .withMountedCache("/root/.bun-cache", cacheVolume("bun-cache"))
+      .withEnvVariable("BUN_INSTALL_CACHE_DIR", "/root/.bun-cache")
+      .withMountedCache("/root/.corepack", cacheVolume("corepack"))
+      .withEnvVariable("COREPACK_HOME", "/root/.corepack")
+      .withEnvVariable("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0")
+      .withEnvVariable("CI", "true")
+      .withEnvVariable("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", "1")
+      .withEnvVariable("PUPPETEER_SKIP_DOWNLOAD", "1")
+      .withEnvVariable("CYPRESS_INSTALL_BINARY", "0")
+      .withEnvVariable("HUSKY", "0")
+      .withEnvVariable("SKIP_INSTALL_SIMPLE_GIT_HOOKS", "1")
+    if (pm == "pnpm" or pm == "yarn") {
+      # Images from node 25 on no longer ship corepack, and --force replaces
+      # the yarn they still ship.
+      let ctr = if (pm == "pnpm") {
+        base
+          .withMountedCache("/root/.pnpm-store", cacheVolume("pnpm-store"))
+          .withEnvVariable("npm_config_store_dir", "/root/.pnpm-store")
+      } else {
+        base
+      }
+      ctr.withExec([
+        "sh",
+        "-c",
+        "command -v corepack >/dev/null 2>&1 || npm install -g --force corepack; corepack enable",
+      ])
+    } else if (pm == "bun") {
+      base.withExec(["sh", "-c", "command -v bun >/dev/null 2>&1 || npm install -g bun"])
+    } else {
+      base
+    }
+  }
+
+  """
   Keys feed cache keys and batch arguments, so give them a stable order.
   """
   let sorted(items: [String!]!): [String!]! {
@@ -187,8 +290,8 @@ type PrettierProjects @collection {
     let failures = paths.map { p => project(p) }.{{path, failure: checkFailure(ws)}}
       .filter { result => result.failure != null }
     if (failures.length > 0) {
-      raise "Prettier found issues in " + toString(failures.length) + " project(s):\n"
-        + failures.map { result => "- " + result.path + ":\n" + (result.failure ?? "") }.join("\n")
+      raise "Prettier failed in " + toString(failures.length) + " project(s):\n"
+        + failures.map { result => "- " + result.path + ": " + (result.failure ?? "") }.join("\n")
     }
     null
   }
@@ -202,7 +305,7 @@ type PrettierProjects @collection {
       .filter { result => result.failure != null }
     if (failures.length > 0) {
       raise "Prettier failed in " + toString(failures.length) + " project(s):\n"
-        + failures.map { result => "- " + result.path + ":\n" + (result.failure ?? "") }.join("\n")
+        + failures.map { result => "- " + result.path + ": " + (result.failure ?? "") }.join("\n")
     }
 
     # Each project contributes only its own files (nested projects are cut
@@ -254,33 +357,226 @@ type PrettierProject {
   }
 
   """
-  Prettier's report for this project, or null when it is formatted.
+  Why checking this project failed, naming the step, or null when it is
+  formatted. It never raises, so a batch reports every project.
   """
   let checkFailure(ws: Workspace!): String {
-    failureOf(
-      runner(ws).withExec(
-        ["npx", "prettier", "--check", "."] + excludeNested(ws),
-        expect: ReturnType.ANY,
-      ),
-    )
+    {
+      let install = installFailure(ws)
+      if (install != null) { install } else { toolFailure(checkExec(ws), "prettier --check") }
+    } rescue {
+      err: Error => err.message
+    }
   }
 
   """
-  Prettier's errors from formatting this project, or null when it ran cleanly.
+  Why formatting this project failed, naming the step, or null.
   """
   let formatFailure(ws: Workspace!): String {
-    failureOf(formatExec(ws))
+    {
+      let install = installFailure(ws)
+      if (install != null) { install } else { toolFailure(formatExec(ws), "prettier --write") }
+    } rescue {
+      err: Error => err.message
+    }
+  }
+
+  let checkExec(ws: Workspace!): Container! {
+    runner(ws).withExec(prettier(ws, ["--check", "."] + excludeNested(ws)), expect: ReturnType.ANY)
   }
 
   let formatExec(ws: Workspace!): Container! {
-    runner(ws).withExec(
-      ["npx", "prettier", "--write", "."] + excludeNested(ws),
-      expect: ReturnType.ANY,
+    runner(ws).withExec(prettier(ws, ["--write", "."] + excludeNested(ws)), expect: ReturnType.ANY)
+  }
+
+  let toolFailure(ran: Container!, step: String!): String {
+    let code = ran.exitCode
+    if (code == 0) {
+      null
+    } else if (code == 127) {
+      ran.stderr.trim(" \n")
+    } else {
+      step + " failed (exit " + toString(code) + "):\n" + ran.stderr.trim(" \n")
+    }
+  }
+
+  """
+  The Prettier command: npx without a package.json, otherwise the wrapper
+  runner installs, which runs the project's own Prettier.
+  """
+  let prettier(ws: Workspace!, args: [String!]!): [String!]! {
+    if (installRoot(ws) == null) { ["npx", "--yes", "prettier"] + args } else { ["prettier"] + args }
+  }
+
+  """
+  A prettier command that runs the nearest node_modules/.bin/prettier between
+  the working directory and the install root, or yarn's under Plug'n'Play,
+  and says how to fix it when there is none.
+  """
+  let wrapper(root: String!): String! {
+    "#!/bin/sh\n"
+      + "d=\"$PWD\"\n"
+      + "while :; do\n"
+      + "  if [ -x \"$d/node_modules/.bin/prettier\" ]; then exec \"$d/node_modules/.bin/prettier\" \"$@\"; fi\n"
+      + "  if [ \"$d\" = /src ] || [ \"$d\" = / ]; then break; fi\n"
+      + "  d=$(dirname \"$d\")\n"
+      + "done\n"
+      + "if [ -f /src/.pnp.cjs ]; then exec yarn prettier \"$@\"; fi\n"
+      + "echo \"prettier is not installed: add it to the devDependencies of "
+      + tool.join(root, "package.json")
+      + " (or of a package.json between it and the project)\" >&2\n"
+      + "exit 127\n"
+  }
+
+  """
+  Where dependencies are installed: the nearest workspace root at or above
+  this project (pnpm-workspace.yaml, or a package.json with "workspaces"),
+  else the nearest lockfile's directory, else the nearest package.json's.
+  Null when there is no package.json at or above the project.
+  """
+  let installRoot(ws: Workspace!): String {
+    let from = "/" + path
+    if (ws.findUp("package.json", from) == null) {
+      null
+    } else {
+      let workspaceRoot = tool.nearest([
+        tool.dirOf(ws.findUp("pnpm-workspace.yaml", from)),
+        workspacesRoot(ws, from),
+      ])
+      let lockRoot = tool.nearest(
+        lockfiles.map { name => tool.dirOf(ws.findUp(name, from)) },
+      )
+      workspaceRoot ?? lockRoot ?? tool.dirOf(ws.findUp("package.json", from))
+    }
+  }
+
+  let lockfiles: [String!]! = [
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "bun.lock",
+    "bun.lockb",
+  ]
+
+  """
+  The nearest directory at or above from whose package.json declares
+  "workspaces", or null.
+  """
+  let workspacesRoot(ws: Workspace!, from: String!): String {
+    let found = ws.findUp("package.json", from)
+    if (found == null) {
+      null
+    } else {
+      let dir = tool.dirOf(found) ?? "."
+      if (ws.file(found ?? "").contents.contains("\"workspaces\"")) {
+        dir
+      } else if (dir == ".") {
+        null
+      } else {
+        workspacesRoot(ws, "/" + (tool.dirOf("/" + dir) ?? "."))
+      }
+    }
+  }
+
+  """
+  The configured package manager, else the one root's package.json names in
+  "packageManager", else the one its lockfile belongs to, else npm.
+  """
+  let packageManager(ws: Workspace!, root: String!): String! {
+    if (tool.packageManager != "") {
+      tool.packageManager
+    } else {
+      let text = { ws.file("/" + tool.join(root, "package.json")).contents } rescue {
+        err: Error => ""
+      }
+      let declared = if (text.contains("\"packageManager\"")) {
+        text.replaceMatches(`(?s)^.*"packageManager"\s*:\s*"([a-zA-Z]+)@.*$`, with: "$1")
+      } else {
+        ""
+      }
+      if (["npm", "pnpm", "yarn", "bun"].contains(declared)) {
+        declared
+      } else if (has(ws, root, "pnpm-lock.yaml") or has(ws, root, "pnpm-workspace.yaml")) {
+        "pnpm"
+      } else if (has(ws, root, "yarn.lock")) {
+        "yarn"
+      } else if (has(ws, root, "bun.lock") or has(ws, root, "bun.lockb")) {
+        "bun"
+      } else {
+        "npm"
+      }
+    }
+  }
+
+  let has(ws: Workspace!, dir: String!, name: String!): Boolean! {
+    ws.findUp(name, "/" + dir) == "/" + tool.join(dir, name)
+  }
+
+  """
+  Everything the install reads, and nothing else, so editing source files
+  does not re-run it.
+  """
+  let installInputs(ws: Workspace!, root: String!): Directory! {
+    ws.directory(
+      "/" + root,
+      include: [
+        "**/package.json",
+        "pnpm-lock.yaml",
+        "pnpm-workspace.yaml",
+        ".pnpmfile.cjs",
+        "yarn.lock",
+        ".yarnrc",
+        ".yarnrc.yml",
+        ".yarn/releases/**",
+        ".yarn/plugins/**",
+        ".yarn/patches/**",
+        "package-lock.json",
+        "npm-shrinkwrap.json",
+        "bun.lock",
+        "bun.lockb",
+        "bunfig.toml",
+        "**/.npmrc",
+        "patches/**",
+      ],
+      exclude: ["**/node_modules"],
     )
   }
 
-  let failureOf(ran: Container!): String {
-    if (ran.exitCode == 0) { null } else { ran.stderr.trim(" \n") }
+  let installCommand(ws: Workspace!, root: String!): [String!]! {
+    [packageManager(ws, root), "install"] + tool.installFlags
+  }
+
+  """
+  The install root with its dependencies installed. The install may have
+  failed: read exitCode.
+  """
+  let installed(ws: Workspace!, root: String!): Container! {
+    tool
+      .nodeBase(packageManager(ws, root))
+      .withDirectory("/src", installInputs(ws, root))
+      .withWorkdir("/src")
+      .withExec(installCommand(ws, root), expect: ReturnType.ANY)
+  }
+
+  """
+  Why installing dependencies failed, with the end of its output, or null.
+  """
+  let installFailure(ws: Workspace!): String {
+    let root = installRoot(ws)
+    if (root == null) {
+      null
+    } else {
+      let ran = installed(ws, root ?? ".")
+      let code = ran.exitCode
+      if (code == 0) {
+        null
+      } else {
+        let output = (ran.stdout.trim(" \n") + "\n" + ran.stderr.trim(" \n")).trim(" \n")
+        "install failed (" + installCommand(ws, root ?? ".").join(" ") + ", exit " + toString(code)
+          + "):\n" + output.split("\n").takeLast(15).join("\n")
+      }
+    }
   }
 
   """
@@ -299,41 +595,30 @@ type PrettierProject {
   }
 
   """
-  Directory holding the nearest package.json at or above this project, or
-  null when there is none.
-  """
-  let packageRoot(ws: Workspace!): String {
-    let found = ws.findUp("package.json", "/" + path)
-    if (found == null) {
-      null
-    } else {
-      tool.normalize((found ?? "").trimSuffix("package.json"))
-    }
-  }
-
-  """
   Container that runs Prettier, with this project as the working directory.
-  With a package.json at or above the project, its dependencies are installed
-  so the project's own Prettier and plugins are used; otherwise npx fetches
-  Prettier on demand.
+  With a package.json at or above the project, the install root's
+  dependencies are installed and the source laid over them; otherwise npx
+  fetches Prettier on demand.
   """
   let runner(ws: Workspace!): Container! {
-    let pkg = packageRoot(ws)
-    let root = pkg ?? path
-    let source = ws.directory("/" + root, exclude: ["**/node_modules"], gitignore: true)
-    let ctr = if (pkg == null) {
-      container
-        .from(tool.baseImageAddress)
-        .withMountedCache("/root/.packages", cacheVolume("node-toolchain-packages"))
-        .withEnvVariable("npm_config_cache", "/root/.packages")
-        .withDirectory("/src", source)
-        .withEnvVariable("CI", "true")
+    let root = installRoot(ws)
+    let mount = root ?? path
+    let source = ws.directory("/" + mount, exclude: ["**/node_modules"], gitignore: true)
+    let ctr = if (root == null) {
+      tool.nodeBase("npm").withDirectory("/src", source)
     } else {
-      nodejs(source, tool.baseImageAddress, tool.packageManager).base
+      installed(ws, root ?? ".")
+        .withDirectory("/src", source)
+        # 493 is 0755.
+        .withNewFile("/usr/local/bin/prettier", wrapper(root ?? "."), permissions: 493)
     }
-    let dir = tool.relativeTo(root, path)
+    let dir = tool.relativeTo(mount, path)
+    let configured = tool.environment.reduce(ctr) { acc, pair =>
+      let key = pair.replaceMatches(`(?s)=.*$`, with: "")
+      acc.withEnvVariable(key, pair.trimPrefix(key + "="))
+    }
     # Plain output, so reports read cleanly in error messages.
-    ctr
+    configured
       .withEnvVariable("NO_COLOR", "1")
       .withWorkdir(if (dir == ".") { "/src" } else { "/src/" + dir })
   }

@@ -4,8 +4,7 @@ Check and fix formatting with [Prettier](https://prettier.io).
 
 ## Requirements
 
-Dagger engine `v1.0.0-beta.15` or later. That release is not out yet, so for
-now this module only runs on a dev engine.
+Requires Dagger v1.0.0-beta.15 or later.
 
 ## Install
 
@@ -44,8 +43,10 @@ Because only file names are checked:
 
 Which projects you see depends on where you run `dagger`:
 
-- **Inside a project's subdirectory:** only the enclosing project.
-- **At a project root:** that project and the projects below it.
+- **Inside a project's subdirectory:** the enclosing project, plus any
+  projects nested below that directory.
+- **At a project root:** that project and the projects below it, never the
+  ones above it.
 - **In a directory that belongs to no project:** the projects below it.
 
 Given `app/.prettierrc`, `packages/ui/.prettierrc` and
@@ -66,6 +67,7 @@ cd packages && dagger check          # checks packages/ui and packages/ui/legacy
 ```sh
 dagger check -l --all --prettier                       # one line per project
 dagger check --prettier                                # every project in view
+dagger check --check format-check                      # checks named format-check, any module
 dagger check --prettier-project=packages/ui            # one project
 dagger check prettier/projects/format-check --prettier-project=app
 ```
@@ -75,12 +77,21 @@ Flags from `dagger check --help`:
 | Flag | Selects |
 | --- | --- |
 | `--prettier`, `--by-prettier` | checks from this module |
-| `--format-check`, `--check-format-check` | checks named `format-check` |
+| `--check format-check` | checks named `format-check` |
 | `--prettier-project PATH` | one project (repeatable) |
 | `--prettier-projects` | every project |
 
-The selected projects are checked concurrently. A failure lists every
-project with issues, with Prettier's report for each.
+The selected projects are checked concurrently. A failure names every
+failing project and the step that failed, for example:
+
+```
+Prettier failed in 3 project(s):
+- a: install failed (npm install, exit 1):
+  npm error 404 Not Found - GET https://registry.npmjs.org/...
+- b: prettier --check failed (exit 1):
+  [warn] index.js
+- c: prettier is not installed: add it to the devDependencies of c/package.json (...)
+```
 
 ## Fixing formatting
 
@@ -90,8 +101,16 @@ to look up the project that contains a path. The path is relative to your
 working directory:
 
 ```sh
-dagger call prettier project --path=. format            # the project you're in
-dagger call prettier project --path=packages/ui format
+dagger call -y prettier project --path=. format            # the project you're in
+dagger call -y prettier project --path=packages/ui format
+```
+
+`dagger call` asks before applying the changes. Without a terminal to ask in
+(scripts, CI, agents) it fails unless you pass `-y`. A project can also be
+picked by its key in the Dagger shell. `export .` writes the changes:
+
+```sh
+dagger -c 'prettier | projects | get packages/ui | format | export .'
 ```
 
 The changes are rooted at your working directory. When you run from inside a
@@ -103,32 +122,57 @@ Prettier a second time next to `format-check`.
 
 ## Dependencies
 
-Prettier runs from the project directory. When there is a `package.json` at
-or above the project, the nearest one's dependencies are installed with the
-configured package manager, so the project's own Prettier version and plugins
-are used. Without one, `npx` fetches the latest Prettier on demand, so a
-standalone Prettier config works without a Node project.
+Prettier runs from the project directory.
 
-The directory holding that `package.json`, or the project itself, is mounted
-without `node_modules` and without files ignored by `.gitignore`.
+**Without a `package.json`** at or above the project, `npx` fetches the latest
+Prettier, so a standalone Prettier config works without a Node project.
+
+**With one**, dependencies are installed and the project's own Prettier runs:
+the nearest `node_modules/.bin/prettier` between the project and the install
+root, or yarn's under Plug'n'Play. If there is none, the check fails with
+`prettier is not installed: add it to the devDependencies of ...` rather than
+fetching a different version.
+
+- **Install root.** The nearest workspace root at or above the project: a
+  directory with `pnpm-workspace.yaml`, or a `package.json` with
+  `"workspaces"`. Failing that, the nearest lockfile's directory, then the
+  nearest `package.json`'s. A package inside a monorepo therefore installs
+  with the whole workspace, so `workspace:` and `catalog:` dependencies
+  resolve.
+- **Package manager.** The `packageManager` setting if set. Otherwise the
+  `packageManager` field of the install root's `package.json`, then its
+  lockfile (`pnpm-lock.yaml` or `pnpm-workspace.yaml`: pnpm, `yarn.lock`:
+  yarn, `bun.lock`/`bun.lockb`: bun), then npm. pnpm and yarn run through
+  corepack, installed when the image lacks it, at the version the
+  `packageManager` field pins.
+- **Caching.** The install sees only what it reads: every `package.json`,
+  lockfiles, `pnpm-workspace.yaml`, `.npmrc`, `.yarnrc*`, `.yarn/{releases,plugins,patches}`,
+  `.pnpmfile.cjs`, `bunfig.toml` and `patches/`. The rest of the source is
+  laid over the result, so editing a source file does not reinstall. Package
+  manager caches and corepack live on cache volumes.
+- **Less noise.** Browser downloads (Playwright, Puppeteer, Cypress) and git
+  hook installers (husky, simple-git-hooks) are switched off. Install scripts
+  still run. They see only the install inputs, so a script that needs source
+  files fails; pass `--ignore-scripts` through `installFlags`.
+
+The install root, or the project itself, is mounted without `node_modules`
+and without files ignored by `.gitignore`.
 
 ## Settings
 
 Set them with `dagger settings`, or in `dagger.toml`:
 
 ```sh
-dagger settings prettier baseImageAddress node:22-alpine
+dagger settings prettier packageManager pnpm
 ```
 
 ```toml
 [modules.prettier.settings]
-baseImageAddress = "node:22-alpine"   # default: node:25-alpine; any image with node and npx
-packageManager = "pnpm"               # default: npm; also yarn, pnpm or bun
+baseImageAddress = "node:22-alpine"      # default: node:25-alpine; any image with node and npm
+packageManager = "pnpm"                  # default: "" (detect); npm, yarn, pnpm or bun
+installFlags = ["--ignore-scripts"]      # default: []; appended to the install command
+environment = ["NODE_OPTIONS=--max-old-space-size=4096"]  # default: []; KEY=VALUE for Prettier
 ```
-
-pnpm is enabled through corepack. The default `node:25-alpine` image does not
-include corepack, so pair pnpm with an image that does, such as
-`node:22-alpine`.
 
 ## Use from another module
 

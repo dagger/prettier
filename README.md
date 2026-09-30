@@ -72,6 +72,10 @@ dagger check --prettier-project=packages/ui            # one project
 dagger check prettier/projects/format-check --prettier-project=app
 ```
 
+Run checks with `dagger check`, including in CI. `dagger call` on a check
+function such as `format-check` does not fail the command when the check
+fails.
+
 Flags from `dagger check --help`:
 
 | Flag | Selects |
@@ -81,15 +85,16 @@ Flags from `dagger check --help`:
 | `--prettier-project PATH` | one project (repeatable) |
 | `--prettier-projects` | every project |
 
-The selected projects are checked concurrently. A failure names every
-failing project and the step that failed, for example:
+The selected projects are checked concurrently. Each line of Prettier's
+output starts with its project, e.g. `[packages/ui] [warn] src/a.ts`. A
+failure names every failing project and the step that failed, for example:
 
 ```
 Prettier failed in 3 project(s):
 - a: install failed (npm install, exit 1):
   npm error 404 Not Found - GET https://registry.npmjs.org/...
 - b: prettier --check failed (exit 1):
-  [warn] index.js
+  [b] [warn] index.js
 - c: prettier is not installed: add it to the devDependencies of c/package.json (...)
 ```
 
@@ -147,9 +152,13 @@ fetching a different version.
   `packageManager` field pins.
 - **Caching.** The install sees only what it reads: every `package.json`,
   lockfiles, `pnpm-workspace.yaml`, `.npmrc`, `.yarnrc*`, `.yarn/{releases,plugins,patches}`,
-  `.pnpmfile.cjs`, `bunfig.toml` and `patches/`. The rest of the source is
-  laid over the result, so editing a source file does not reinstall. Package
-  manager caches and corepack live on cache volumes.
+  `.pnpmfile.cjs`, `bunfig.toml`, `patches/`, and the directories that
+  `file:`, `link:` and `portal:` dependencies point at (package managers copy
+  those). The rest of the source is laid over the result, so editing a
+  source file does not reinstall. If a `package.json` can't be read, or pnpm
+  injects a workspace package (`dependenciesMeta.*.injected`), the install
+  gets the full source instead. Package manager caches, the pnpm store
+  (passed with `--store-dir`) and corepack live on cache volumes.
 - **Less noise.** Browser downloads (Playwright, Puppeteer, Cypress) and git
   hook installers (husky, simple-git-hooks) are switched off. Install scripts
   still run. They see only the install inputs, so a script that needs source
@@ -164,6 +173,7 @@ Set them with `dagger settings`, or in `dagger.toml`:
 
 ```sh
 dagger settings prettier packageManager pnpm
+dagger settings -u prettier packageManager      # back to the default
 ```
 
 ```toml

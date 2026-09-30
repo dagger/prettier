@@ -1,0 +1,9 @@
+{
+  "name": "local-dep",
+  "private": true,
+  "packageManager": "pnpm@10.34.6",
+  "devDependencies": {
+    "local-prettier-config": "file:./prettier-config",
+    "prettier": "3.6.2"
+  }
+}

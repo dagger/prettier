@@ -1,0 +1,32 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    devDependencies:
+      local-prettier-config:
+        specifier: file:./prettier-config
+        version: file:prettier-config
+      prettier:
+        specifier: 3.6.2
+        version: 3.6.2
+
+packages:
+
+  local-prettier-config@file:prettier-config:
+    resolution: {directory: prettier-config, type: directory}
+
+  prettier@3.6.2:
+    resolution: {integrity: sha512-I7AIg5boAr5R0FFtJ6rCfD+LFsWHp81dolrFD8S79U9tb8Az2nGrJncnMSnys+bpQJfRUzqs9hnA81OAA3hCuQ==}
+    engines: {node: '>=14'}
+    hasBin: true
+
+snapshots:
+
+  local-prettier-config@file:prettier-config: {}
+
+  prettier@3.6.2: {}

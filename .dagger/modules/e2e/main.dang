@@ -5,7 +5,8 @@ The fixtures live under `testdata/`: `formatted` is formatted and holds a
 nested project with its own config and ignore file, and `unformatted` is
 unformatted on purpose and installs its own Prettier from a package.json.
 `pnpm-workspace` is a pnpm workspace whose member package `packages/app` is a
-project and takes Prettier from the workspace catalog.
+project and takes Prettier from the workspace catalog. `local-dep` takes its
+Prettier config from a `file:` dependency, which pnpm copies at install time.
 """
 type E2e {
   """
@@ -17,6 +18,7 @@ type E2e {
   let nested: String! = "testdata/formatted/nested"
   let unformatted: String! = "testdata/unformatted"
   let pnpmApp: String! = "testdata/pnpm-workspace/packages/app"
+  let localDep: String! = "testdata/local-dep"
 
   let assert(condition: Boolean!, message: String!): Void {
     if (condition == false) { raise message }
@@ -83,7 +85,7 @@ type E2e {
     # Outside any project: the projects below.
     let keys = prettier.projects(ws).keys
     assert(
-      keys == [formatted, nested, pnpmApp, unformatted],
+      keys == [formatted, nested, localDep, pnpmApp, unformatted],
       "projects from the root: " + keys.join(", "),
     )
     let fromTestdata = prettier.projects(ws.withWorkdir("testdata")).keys
@@ -220,6 +222,11 @@ type E2e {
     )
     assert(batch.contains("- " + unformatted + ":"), "the batch did not name the failing project: " + batch)
     assert(batch.contains("- " + formatted + ":") == false, "the batch blamed a formatted project: " + batch)
+    # Several projects run at once, so each output line names its project.
+    assert(
+      batch.contains("[" + unformatted + "] [warn] index.js"),
+      "Prettier's output was not prefixed with the project: " + batch,
+    )
 
     # The package.json install writes a lockfile; only Prettier's edits come
     # back.
@@ -299,6 +306,16 @@ type E2e {
       npm.contains("install failed (npm install, exit"),
       "an explicit npm did not install at the workspace root: " + npm,
     )
+
+    # pnpm ignores npm_config_store_dir from pnpm 12 on, so the cached store
+    # is named on the command line.
+    let flagged = failure(
+      prettier(installFlags: ["--no-such-flag"]).projects(ws).get(key: pnpmApp).formatCheck(ws),
+    )
+    assert(
+      flagged.contains("install failed (pnpm install --store-dir /root/.pnpm-store --no-such-flag, exit"),
+      "pnpm was not pointed at the cached store: " + flagged,
+    )
     null
   }
 
@@ -372,6 +389,15 @@ type E2e {
     run(
       prettier(environment: ["PRETTIER_SEMI=false"]).projects(configured).get(key: "e").formatCheck(configured),
     )
+    null
+  }
+
+  """
+  A file: dependency is installed with its files, so a shared Prettier
+  config from one resolves.
+  """
+  localDependencyCheck(ws: Workspace!): Void @check {
+    run(prettier.projects(ws).get(key: localDep).formatCheck(ws))
     null
   }
 }

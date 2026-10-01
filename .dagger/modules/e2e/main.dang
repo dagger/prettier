@@ -285,6 +285,12 @@ type E2e {
       checked.contains("- a:") and checked.contains("- b:") and checked.contains("- c:") == false,
       "the check batch did not report exactly the failing projects: " + checked,
     )
+    # These projects have no package.json, so npx runs Prettier. It must
+    # find the real one, not the module's wrapper, which would call itself.
+    assert(
+      checked.contains("[a] [error]") and checked.contains("[a] [a]") == false,
+      "npx ran the wrapper instead of Prettier: " + checked,
+    )
     null
   }
 

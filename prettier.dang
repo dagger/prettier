@@ -400,8 +400,14 @@ type PrettierProject {
     }
   }
 
+  """
+  Where runner puts the wrapper. Not on PATH: npx runs a prettier it finds on
+  PATH, so a wrapper there would call itself forever.
+  """
+  let wrapperPath: String! = "/opt/dagger-prettier/prettier"
+
   let prettier(args: [String!]!): [String!]! {
-    ["prettier"] + args
+    [wrapperPath] + args
   }
 
   """
@@ -689,7 +695,7 @@ type PrettierProject {
     # Plain output, so reports read cleanly in error messages.
     configured
       # 493 is 0755.
-      .withNewFile("/usr/local/bin/prettier", wrapper(root), permissions: 493)
+      .withNewFile(wrapperPath, wrapper(root), permissions: 493)
       .withEnvVariable("PRETTIER_PROJECT", path)
       .withEnvVariable("NO_COLOR", "1")
       .withWorkdir(if (dir == ".") { "/src" } else { "/src/" + dir })

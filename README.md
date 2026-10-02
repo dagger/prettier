@@ -16,7 +16,9 @@ dagger install github.com/dagger/prettier
 
 Every directory holding a Prettier config file is a project. The config files
 are `.prettierrc`, `.prettierrc.{json,json5,yaml,yml,toml,js,mjs,cjs,ts,mts,cts}`
-and `prettier.config.{js,mjs,cjs,ts,mts,cts}`.
+and `prettier.config.{js,mjs,cjs,ts,mts,cts}`. A TypeScript config loads
+only when Node can strip its types, which Prettier needs `"type": "module"`
+in the nearest `package.json` for.
 
 Projects form a collection keyed by directory, relative to the workspace root:
 
@@ -163,9 +165,16 @@ fetching a different version.
   hook installers (husky, simple-git-hooks) are switched off. Install scripts
   still run. They see only the install inputs, so a script that needs source
   files fails; pass `--ignore-scripts` through `installFlags`.
+- **Install output stays out.** Prettier skips what the install writes into
+  the tree (`node_modules`, and yarn Plug'n'Play's `.pnp.cjs`,
+  `.pnp.loader.mjs` and `.yarn/`), and `format` never returns those files.
 
 The install root, or the project itself, is mounted without `node_modules`
-and without files ignored by `.gitignore`.
+and without files ignored by any `.gitignore` in the tree. Prettier run
+locally reads only the `.gitignore` in its working directory. So a file
+ignored by a parent directory's `.gitignore` (e.g. a root `dist/` ignoring
+`packages/ui/dist/`) is checked by a local `prettier --check .` but not by
+`dagger check`.
 
 ## Settings
 

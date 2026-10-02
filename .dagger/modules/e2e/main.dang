@@ -7,6 +7,8 @@ unformatted on purpose and installs its own Prettier from a package.json.
 `pnpm-workspace` is a pnpm workspace whose member package `packages/app` is a
 project and takes Prettier from the workspace catalog. `local-dep` takes its
 Prettier config from a `file:` dependency, which pnpm copies at install time.
+`yarn-pnp` installs with yarn 4 Plug'n'Play, which writes `.pnp.cjs` into the
+project.
 """
 type E2e {
   """
@@ -19,6 +21,7 @@ type E2e {
   let unformatted: String! = "testdata/unformatted"
   let pnpmApp: String! = "testdata/pnpm-workspace/packages/app"
   let localDep: String! = "testdata/local-dep"
+  let yarnPnp: String! = "testdata/yarn-pnp"
 
   let assert(condition: Boolean!, message: String!): Void {
     if (condition == false) { raise message }
@@ -85,7 +88,7 @@ type E2e {
     # Outside any project: the projects below.
     let keys = prettier.projects(ws).keys
     assert(
-      keys == [formatted, nested, localDep, pnpmApp, unformatted],
+      keys == [formatted, nested, localDep, pnpmApp, unformatted, yarnPnp],
       "projects from the root: " + keys.join(", "),
     )
     let fromTestdata = prettier.projects(ws.withWorkdir("testdata")).keys
@@ -308,9 +311,28 @@ type E2e {
     let npm = failure(
       prettier(packageManager: "npm").projects(ws).get(key: pnpmApp).formatCheck(ws),
     )
+    # The workspace root itself depends on `catalog:`, which npm can't read,
+    # so an explicit npm fails at the install step, at the root.
     assert(
-      npm.contains("install failed (npm install, exit"),
+      npm.contains("install failed (npm install, exit") and npm.contains("EUNSUPPORTEDPROTOCOL"),
       "an explicit npm did not install at the workspace root: " + npm,
+    )
+
+    # When the root has nothing npm can't read, npm installs it and the
+    # failure is the next step: the member's Prettier is not installed.
+    let rootless = directory
+      .withNewFile("pnpm-workspace.yaml", "packages:\n  - svc\n")
+      .withNewFile("package.json", "{\n  \"private\": true\n}\n")
+      .withNewFile("svc/package.json", "{\n  \"private\": true,\n  \"devDependencies\": {\n    \"prettier\": \"catalog:\"\n  }\n}\n")
+      .withNewFile("svc/.prettierrc", "{}\n")
+      .withNewFile("svc/index.js", "export const svc = 1;\n")
+      .asWorkspace
+    let missing = failure(
+      prettier(packageManager: "npm").projects(rootless).get(key: "svc").formatCheck(rootless),
+    )
+    assert(
+      missing.contains("prettier is not installed: add it to the devDependencies of package.json"),
+      "npm at a workspace root without dependencies did not reach the Prettier step: " + missing,
     )
 
     # pnpm ignores npm_config_store_dir from pnpm 12 on, so the cached store
@@ -404,6 +426,18 @@ type E2e {
   """
   localDependencyCheck(ws: Workspace!): Void @check {
     run(prettier.projects(ws).get(key: localDep).formatCheck(ws))
+    null
+  }
+
+  """
+  Under yarn Plug'n'Play the install writes .pnp.cjs and .yarn/ into the
+  project. Prettier leaves them alone, and format never returns them.
+  """
+  yarnPnpCheck(ws: Workspace!): Void @check {
+    let project = prettier.projects(ws).get(key: yarnPnp)
+    run(project.formatCheck(ws))
+    let changes = project.format(ws)
+    assert(changes.isEmpty, "formatting a formatted PnP project changed: " + changed(changes).join(", "))
     null
   }
 }

@@ -382,11 +382,11 @@ type PrettierProject {
   }
 
   let checkExec(ws: Workspace!): Container! {
-    runner(ws).withExec(prettier(["--check", "."] + excludeNested(ws)), expect: ReturnType.ANY)
+    runner(ws).withExec(prettier(["--check", "."] + excludes(ws)), expect: ReturnType.ANY)
   }
 
   let formatExec(ws: Workspace!): Container! {
-    runner(ws).withExec(prettier(["--write", "."] + excludeNested(ws)), expect: ReturnType.ANY)
+    runner(ws).withExec(prettier(["--write", "."] + excludes(ws)), expect: ReturnType.ANY)
   }
 
   let toolFailure(ran: Container!, step: String!): String {
@@ -401,13 +401,15 @@ type PrettierProject {
   }
 
   """
-  Where runner puts the wrapper. Not on PATH: npx runs a prettier it finds on
-  PATH, so a wrapper there would call itself forever.
+  Where runner puts the wrapper. Its name labels Prettier's output, and it
+  must not be "prettier": npx runs a prettier it finds on PATH, so a wrapper
+  by that name would call itself forever.
   """
-  let wrapperPath: String! = "/opt/dagger-prettier/prettier"
+  let wrapperPath: String! = "/usr/local/bin/dagger-prettier"
 
   let prettier(args: [String!]!): [String!]! {
-    [wrapperPath] + args
+    # Called by name, which labels each line of output in the TUI.
+    ["dagger-prettier"] + args
   }
 
   """
@@ -668,6 +670,17 @@ type PrettierProject {
       .map { dir => tool.relativeTo(path, dir) }
   }
 
+  """
+  What the install writes into the source tree that isn't node_modules:
+  yarn Plug'n'Play's loaders and its .yarn directory. Prettier leaves them
+  alone and format never returns them.
+  """
+  let installArtifacts: [String!]! = ["**/.pnp.cjs", "**/.pnp.loader.mjs", "**/.yarn"]
+
+  let excludes(ws: Workspace!): [String!]! {
+    excludeNested(ws) + ["!**/.pnp.cjs", "!**/.pnp.loader.mjs", "!**/.yarn/**"]
+  }
+
   let excludeNested(ws: Workspace!): [String!]! {
     nested(ws).map { dir => "!" + dir + "/**" }
   }
@@ -710,7 +723,7 @@ type PrettierProject {
   let placed(ws: Workspace!, ctr: Container!): Directory! {
     let cwd = tool.normalize(ws.cwd)
     let own = nested(ws).reduce(ctr.directory(".")) { dir, sub => dir.withoutDirectory(sub) }
-    let files = directory.withDirectory(".", own, exclude: ["**/node_modules"])
+    let files = directory.withDirectory(".", own, exclude: ["**/node_modules"] + installArtifacts)
     if (tool.contains(cwd, path)) {
       directory.withDirectory(tool.relativeTo(cwd, path), files)
     } else {

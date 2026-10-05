@@ -1,24 +1,443 @@
 """
 End-to-end checks for the prettier toolchain.
+
+The fixtures live under `testdata/`: `formatted` is formatted and holds a
+nested project with its own config and ignore file, and `unformatted` is
+unformatted on purpose and installs its own Prettier from a package.json.
+`pnpm-workspace` is a pnpm workspace whose member package `packages/app` is a
+project and takes Prettier from the workspace catalog. `local-dep` takes its
+Prettier config from a `file:` dependency, which pnpm copies at install time.
+`yarn-pnp` installs with yarn 4 Plug'n'Play, which writes `.pnp.cjs` into the
+project.
 """
 type E2e {
   """
-  The git repository to format-check as an end-to-end smoke test.
+  The git repository to format as an end-to-end smoke test.
   """
   repo: String! = "https://github.com/dagger/hello-dagger"
+
+  let formatted: String! = "testdata/formatted"
+  let nested: String! = "testdata/formatted/nested"
+  let unformatted: String! = "testdata/unformatted"
+  let pnpmApp: String! = "testdata/pnpm-workspace/packages/app"
+  let localDep: String! = "testdata/local-dep"
+  let yarnPnp: String! = "testdata/yarn-pnp"
+
+  let assert(condition: Boolean!, message: String!): Void {
+    if (condition == false) { raise message }
+    null
+  }
+
+  """
+  Run a check, raising its failure. A check called through a dependency comes
+  back as a Check that has not run.
+  """
+  let run(check: Check!): Void {
+    # Check.error is not null for a passing check when read from Dang, so ask
+    # pass first and read the message only on failure.
+    if (check.pass == false) {
+      raise check.error.message ?? "check failed"
+    }
+    null
+  }
+
+  """
+  The failure message of a check that should fail.
+  """
+  let failure(check: Check!): String! {
+    { run(check); "unexpected success" } rescue {
+      err: Error => err.message
+    }
+  }
+
+  let changed(changes: Changeset!): [String!]! {
+    changes.addedPaths + changes.modifiedPaths + changes.removedPaths
+  }
 
   """
   Run the prettier toolchain against a real-world repository.
 
-  The hello-dagger repo isn't prettier-formatted, so this first applies
-  `write` to format the workspace, then runs `check` against the
-  formatted result to exercise both ends of the toolchain.
+  The hello-dagger repo isn't prettier-formatted, so this first formats the
+  workspace, then checks the formatted result to exercise both ends of the
+  toolchain.
   """
   checkHelloDagger: Void @check {
     let ws = git(repo).head.tree.asWorkspace
+    let projects = prettier.projects(ws)
+    assert(projects.keys == ["."], "hello-dagger projects: " + projects.keys.join(", "))
 
-    let formatted = prettier(ws).write.after.asWorkspace
+    assert(failure(projects.batch.formatCheck(ws)).contains("[warn]"), "unformatted hello-dagger passed")
 
-    prettier(formatted).check
+    let changes = projects.batch.format(ws)
+    assert(changes.modifiedPaths.length > 0, "formatting hello-dagger changed nothing")
+    assert(
+      changes.addedPaths.length == 0 and changes.removedPaths.length == 0,
+      "formatting added or removed files: " + (changes.addedPaths + changes.removedPaths).join(", "),
+    )
+
+    let result = changes.after.asWorkspace
+    run(prettier.projects(result).batch.formatCheck(result))
+  }
+
+  """
+  Projects are keyed by the directories holding a Prettier config at or below
+  the working directory, plus the enclosing one when the working directory is
+  inside a project, as workspace-root paths.
+  """
+  keysCheck(ws: Workspace!): Void @check {
+    # Outside any project: the projects below.
+    let keys = prettier.projects(ws).keys
+    assert(
+      keys == [formatted, nested, localDep, pnpmApp, unformatted, yarnPnp],
+      "projects from the root: " + keys.join(", "),
+    )
+    let fromTestdata = prettier.projects(ws.withWorkdir("testdata")).keys
+    assert(fromTestdata == keys, "projects from a directory in no project: " + fromTestdata.join(", "))
+
+    # At a project root: that project and the ones below it, no ancestors.
+    let below = prettier.projects(ws.withWorkdir(formatted)).keys
+    assert(below == [formatted, nested], "projects from a project root: " + below.join(", "))
+
+    # Inside a project's subdirectory: exactly the enclosing project.
+    let inside = prettier.projects(ws.withWorkdir(formatted + "/src")).keys
+    assert(inside == [formatted], "projects from inside a project: " + inside.join(", "))
+    let insideOther = prettier.projects(ws.withWorkdir(unformatted + "/src")).keys
+    assert(insideOther == [unformatted], "projects from inside another project: " + insideOther.join(", "))
+
+    let fromNested = prettier.projects(ws.withWorkdir(nested)).keys
+    assert(fromNested == [nested], "projects from a nested project: " + fromNested.join(", "))
+
+    # Every Prettier config spelling marks a root, and node_modules is skipped.
+    let synthetic = directory
+      .withNewFile("b/.prettierrc.yml", "semi: false\n")
+      .withNewFile("a/prettier.config.mjs", "export default {};\n")
+      .withNewFile("c/.prettierrc", "{}\n")
+      .withNewFile("c/node_modules/dep/.prettierrc.json", "{}\n")
+      .withNewFile("d/package.json", "{}\n")
+      .asWorkspace
+    let found = prettier.projects(synthetic).keys
+    assert(found == ["a", "b", "c"], "synthetic projects: " + found.join(", "))
+    let none = prettier.projects(synthetic.withWorkdir("d")).keys
+    assert(none.length == 0, "projects from a directory with none: " + none.join(", "))
+    null
+  }
+
+  """
+  get and list build the projects at their keys; subset keeps parent order,
+  rejects unknown and duplicate keys, and narrows what get accepts and what
+  the batches run.
+  """
+  collectionCheck(ws: Workspace!): Void @check {
+    let projects = prettier.projects(ws)
+    assert(projects.get(key: nested).path == nested, "get did not return the project at its key")
+    assert(
+      projects.list.{{path}}.map { p => p.path } == projects.keys,
+      "list did not return one project per key, in key order",
+    )
+
+    let pair = projects.subset(keys: [nested, formatted])
+    assert(pair.keys == [formatted, nested], "subset did not keep parent order: " + pair.keys.join(", "))
+
+    # The unformatted fixture is in the collection but outside the subset.
+    run(pair.batch.formatCheck(ws))
+    let clean = pair.batch.format(ws)
+    assert(clean.isEmpty, "formatting formatted projects changed: " + changed(clean).join(", "))
+
+    let mixed = projects.subset(keys: [formatted, unformatted]).batch.format(ws)
+    assert(
+      changed(mixed) == [unformatted + "/index.js", unformatted + "/src/util.js"],
+      "formatting a mixed subset changed: " + changed(mixed).join(", "),
+    )
+
+    let outside = { pair.get(key: unformatted).path } rescue {
+      err: Error => "rejected"
+    }
+    assert(outside == "rejected", "get accepted a key outside the subset")
+
+    let unknown = { projects.subset(keys: ["no/such/project"]).keys.join(","); "accepted" } rescue {
+      err: Error => "rejected"
+    }
+    assert(unknown == "rejected", "subset accepted an unknown key")
+
+    let duplicate = {
+      projects.subset(keys: [formatted, formatted]).keys.join(",")
+      "accepted"
+    } rescue {
+      err: Error => "rejected"
+    }
+    assert(duplicate == "rejected", "subset accepted a duplicate key")
+
+    let none = projects.subset(keys: [])
+    assert(none.keys.length == 0, "empty subset kept keys: " + none.keys.join(", "))
+    run(none.batch.formatCheck(ws))
+    assert(none.batch.format(ws).isEmpty, "empty subset changed files")
+    null
+  }
+
+  """
+  A lookup by path finds the project containing it.
+  """
+  lookupCheck(ws: Workspace!): Void @check {
+    assert(prettier.project(ws, formatted).path == formatted, "lookup of a project root")
+    assert(prettier.project(ws, formatted + "/src").path == formatted, "lookup inside a project")
+    assert(prettier.project(ws, nested).path == nested, "lookup of a nested project")
+    assert(prettier.project(ws, "/" + nested).path == nested, "lookup of an absolute path")
+    assert(
+      prettier.project(ws.withWorkdir(unformatted + "/src"), ".").path == unformatted,
+      "lookup relative to the working directory",
+    )
+    let missing = { prettier.project(ws, "testdata").path } rescue {
+      err: Error => err.message
+    }
+    assert(missing.contains("no Prettier config found"), "missing project did not fail clearly: " + missing)
+    null
+  }
+
+  """
+  A project leaves its nested projects to their own config and ignore file,
+  so nothing is formatted twice.
+  """
+  nestedCheck(ws: Workspace!): Void @check {
+    # nested/generated.js is a template Prettier cannot parse, ignored by
+    # nested/.prettierignore, which Prettier reads only when run from the
+    # nested project: the parent fails unless it leaves the nested one alone.
+    let projects = prettier.projects(ws)
+    run(projects.get(key: formatted).formatCheck(ws))
+    run(projects.get(key: nested).formatCheck(ws))
+    let parent = projects.get(key: formatted).format(ws)
+    assert(parent.isEmpty, "formatting the parent touched its nested project: " + changed(parent).join(", "))
+    let child = projects.get(key: nested).format(ws)
+    assert(child.isEmpty, "formatting the nested project changed: " + changed(child).join(", "))
+    null
+  }
+
+  """
+  An unformatted project fails its own check and the batch alike. Formatting
+  it changes only its source files, rooted at the working directory; an
+  enclosing project contributes only the working directory's subtree.
+  """
+  unformattedCheck(ws: Workspace!): Void @check {
+    let projects = prettier.projects(ws)
+    let own = failure(projects.get(key: unformatted).formatCheck(ws))
+    assert(own.contains("[warn] index.js"), "the unformatted project passed: " + own)
+    let batch = failure(
+      projects.subset(keys: [formatted, unformatted]).batch.formatCheck(ws),
+    )
+    assert(batch.contains("- " + unformatted + ":"), "the batch did not name the failing project: " + batch)
+    assert(batch.contains("- " + formatted + ":") == false, "the batch blamed a formatted project: " + batch)
+    # Several projects run at once, so each output line names its project.
+    assert(
+      batch.contains("[" + unformatted + "] [warn] index.js"),
+      "Prettier's output was not prefixed with the project: " + batch,
+    )
+
+    # The package.json install writes a lockfile; only Prettier's edits come
+    # back.
+    let changes = projects.get(key: unformatted).format(ws)
+    assert(
+      changed(changes) == [unformatted + "/index.js", unformatted + "/src/util.js"],
+      "formatting from the root changed: " + changed(changes).join(", "),
+    )
+    assert(
+      changes.modifiedPaths.length == 2,
+      "formatting added or removed files: " + changed(changes).join(", "),
+    )
+    let contents = changes.after.file(unformatted + "/index.js").contents
+    assert(contents == "export const greeting = { hello: \"world\" };\n", "formatted file: " + contents)
+
+    let inside = ws.withWorkdir(unformatted)
+    let local = prettier.projects(inside).get(key: unformatted).format(inside)
+    assert(changed(local) == ["index.js", "src/util.js"], "formatting from the project changed: " + changed(local).join(", "))
+
+    let below = ws.withWorkdir(unformatted + "/src")
+    let enclosing = prettier.projects(below).get(key: unformatted).format(below)
+    assert(changed(enclosing) == ["util.js"], "formatting from inside the project changed: " + changed(enclosing).join(", "))
+    null
+  }
+
+  """
+  Prettier errors fail the check and formatting, and the batches report
+  every failing project.
+  """
+  failureCheck(ws: Workspace!): Void @check {
+    let broken = directory
+      .withNewFile("a/.prettierrc", "{}\n")
+      .withNewFile("a/index.js", "const = ;\n")
+      .withNewFile("b/.prettierrc", "{}\n")
+      .withNewFile("b/index.js", "let (\n")
+      .withNewFile("c/.prettierrc", "{}\n")
+      .withNewFile("c/index.js", "export const ok = 1;\n")
+      .asWorkspace
+    let projects = prettier.projects(broken)
+
+    let one = { projects.get(key: "a").format(broken).isEmpty; "unexpected success" } rescue {
+      err: Error => err.message
+    }
+    assert(one.contains("SyntaxError"), "a syntax error did not fail formatting: " + one)
+
+    let all = { projects.batch.format(broken).isEmpty; "unexpected success" } rescue {
+      err: Error => err.message
+    }
+    assert(
+      all.contains("- a:") and all.contains("- b:") and all.contains("- c:") == false,
+      "the format batch did not report exactly the failing projects: " + all,
+    )
+
+    let checked = failure(projects.batch.formatCheck(broken))
+    assert(
+      checked.contains("- a:") and checked.contains("- b:") and checked.contains("- c:") == false,
+      "the check batch did not report exactly the failing projects: " + checked,
+    )
+    # These projects have no package.json, so npx runs Prettier. It must
+    # find the real one, not the module's wrapper, which would call itself.
+    assert(
+      checked.contains("[a] [error]") and checked.contains("[a] [a]") == false,
+      "npx ran the wrapper instead of Prettier: " + checked,
+    )
+    null
+  }
+
+  """
+  A project inside a pnpm workspace installs at the workspace root, with the
+  package manager its package.json names, so `catalog:` resolves, and runs
+  the Prettier installed there. An explicit package manager still wins.
+  """
+  workspaceInstallCheck(ws: Workspace!): Void @check {
+    # Installing in packages/app alone fails: npm and pnpm both reject
+    # `catalog:` outside the workspace.
+    run(prettier.projects(ws).get(key: pnpmApp).formatCheck(ws))
+    assert(prettier.projects(ws).get(key: pnpmApp).format(ws).isEmpty, "formatting the pnpm project changed files")
+
+    let npm = failure(
+      prettier(packageManager: "npm").projects(ws).get(key: pnpmApp).formatCheck(ws),
+    )
+    # The workspace root itself depends on `catalog:`, which npm can't read,
+    # so an explicit npm fails at the install step, at the root.
+    assert(
+      npm.contains("install failed (npm install, exit") and npm.contains("EUNSUPPORTEDPROTOCOL"),
+      "an explicit npm did not install at the workspace root: " + npm,
+    )
+
+    # When the root has nothing npm can't read, npm installs it and the
+    # failure is the next step: the member's Prettier is not installed.
+    let rootless = directory
+      .withNewFile("pnpm-workspace.yaml", "packages:\n  - svc\n")
+      .withNewFile("package.json", "{\n  \"private\": true\n}\n")
+      .withNewFile("svc/package.json", "{\n  \"private\": true,\n  \"devDependencies\": {\n    \"prettier\": \"catalog:\"\n  }\n}\n")
+      .withNewFile("svc/.prettierrc", "{}\n")
+      .withNewFile("svc/index.js", "export const svc = 1;\n")
+      .asWorkspace
+    let missing = failure(
+      prettier(packageManager: "npm").projects(rootless).get(key: "svc").formatCheck(rootless),
+    )
+    assert(
+      missing.contains("prettier is not installed: add it to the devDependencies of package.json"),
+      "npm at a workspace root without dependencies did not reach the Prettier step: " + missing,
+    )
+
+    # pnpm ignores npm_config_store_dir from pnpm 12 on, so the cached store
+    # is named on the command line.
+    let flagged = failure(
+      prettier(installFlags: ["--no-such-flag"]).projects(ws).get(key: pnpmApp).formatCheck(ws),
+    )
+    assert(
+      flagged.contains("install failed (pnpm install --store-dir /root/.pnpm-store --no-such-flag, exit"),
+      "pnpm was not pointed at the cached store: " + flagged,
+    )
+    null
+  }
+
+  """
+  A batch names every failing project and the step that failed: the install,
+  a missing Prettier, or Prettier itself.
+  """
+  installFailureCheck(ws: Workspace!): Void @check {
+    let broken = directory
+      .withNewFile("a/.prettierrc", "{}\n")
+      .withNewFile("a/index.js", "export const a = 1;\n")
+      .withNewFile(
+        "a/package.json",
+        "{\"private\": true, \"devDependencies\": {\"@dagger-e2e-missing/nope\": \"1.0.0\"}}\n",
+      )
+      .withNewFile("b/.prettierrc", "{}\n")
+      .withNewFile("b/index.js", "export const b={b:1}\n")
+      .withNewFile("c/.prettierrc", "{}\n")
+      .withNewFile("c/index.js", "export const c = 1;\n")
+      .withNewFile("c/package.json", "{\"private\": true}\n")
+      .withNewFile("d/.prettierrc", "{}\n")
+      .withNewFile("d/index.js", "export const d = 1;\n")
+      .asWorkspace
+    let message = failure(prettier.projects(broken).batch.formatCheck(broken))
+    assert(message.contains("in 3 project(s)"), "the batch did not count the failures: " + message)
+    assert(message.contains("- a: install failed (npm install, exit"), "the install failure was not named: " + message)
+    assert(message.contains("- b: prettier --check failed (exit 1)"), "the formatting failure was not named: " + message)
+    assert(message.contains("[warn] index.js"), "Prettier's report was lost: " + message)
+    assert(message.contains("- c: prettier is not installed"), "a missing Prettier was not named: " + message)
+    assert(message.contains("- d:") == false, "a passing project was blamed: " + message)
+
+    # The item check names its step too.
+    let own = failure(
+      prettier.projects(broken).get(key: "c").formatCheck(broken),
+    )
+    assert(
+      own.contains("prettier is not installed: add it to the devDependencies of c/package.json"),
+      own,
+    )
+    null
+  }
+
+  """
+  installFlags reach the install command, and environment reaches Prettier.
+  """
+  settingsCheck(ws: Workspace!): Void @check {
+    let scripted = directory
+      .withNewFile("p/.prettierrc", "{}\n")
+      .withNewFile("p/index.js", "export const p = 1;\n")
+      .withNewFile(
+        "p/package.json",
+        "{\n  \"private\": true,\n  \"scripts\": {\n    \"postinstall\": \"exit 3\"\n  },\n  \"devDependencies\": {\n    \"prettier\": \"3.6.2\"\n  }\n}\n",
+      )
+      .asWorkspace
+    let failed = failure(
+      prettier.projects(scripted).get(key: "p").formatCheck(scripted),
+    )
+    assert(failed.contains("install failed (npm install, exit"), "the failing postinstall script did not run: " + failed)
+    run(
+      prettier(installFlags: ["--ignore-scripts"]).projects(scripted).get(key: "p").formatCheck(scripted),
+    )
+
+    let configured = directory
+      .withNewFile("e/prettier.config.cjs", "module.exports = { semi: process.env.PRETTIER_SEMI !== \"false\" }\n")
+      .withNewFile("e/index.js", "export const e = 1\n")
+      .asWorkspace
+    let semi = failure(
+      prettier.projects(configured).get(key: "e").formatCheck(configured),
+    )
+    assert(semi.contains("[warn] index.js"), "the config did not default to semicolons: " + semi)
+    run(
+      prettier(environment: ["PRETTIER_SEMI=false"]).projects(configured).get(key: "e").formatCheck(configured),
+    )
+    null
+  }
+
+  """
+  A file: dependency is installed with its files, so a shared Prettier
+  config from one resolves.
+  """
+  localDependencyCheck(ws: Workspace!): Void @check {
+    run(prettier.projects(ws).get(key: localDep).formatCheck(ws))
+    null
+  }
+
+  """
+  Under yarn Plug'n'Play the install writes .pnp.cjs and .yarn/ into the
+  project. Prettier leaves them alone, and format never returns them.
+  """
+  yarnPnpCheck(ws: Workspace!): Void @check {
+    let project = prettier.projects(ws).get(key: yarnPnp)
+    run(project.formatCheck(ws))
+    let changes = project.format(ws)
+    assert(changes.isEmpty, "formatting a formatted PnP project changed: " + changed(changes).join(", "))
+    null
   }
 }

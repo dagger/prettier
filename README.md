@@ -4,7 +4,7 @@ Check and fix formatting with [Prettier](https://prettier.io).
 
 ## Requirements
 
-Requires Dagger v1.0.0-beta.15 or later.
+Requires Dagger v1.0.0-beta.22 or later.
 
 ## Install
 
@@ -33,13 +33,20 @@ projects. Those are checked from their own directory, so their own config and
 ### Discovery
 
 Projects are found by config file name alone, in one walk of the workspace
-that skips `node_modules`. Listing runs no container and no Prettier.
-Because only file names are checked:
+that skips `node_modules`. Listing (`dagger check -l`, `dagger list`) runs
+no container: it installs nothing and runs no Prettier, so it works even
+when a `package.json` or a config is broken. A config Prettier cannot read
+fails only its own project's check, naming the file. Because only file
+names are checked:
 
 - A config that lives only in the `prettier` key of `package.json` is not
   found. Add a `.prettierrc` to make that directory a project.
 - A config file inside a directory ignored by `.gitignore` (other than
-  `node_modules`) still makes that directory a project.
+  `node_modules`), or a config file that is itself ignored, still makes
+  that directory a project. Prettier runs on the source without ignored
+  files, so it would check nothing there, and that project's
+  `format-check` fails with `Prettier did not run: ...` rather than
+  passing.
 
 ### Your working directory selects projects
 
@@ -87,18 +94,47 @@ Flags from `dagger check --help`:
 | `--prettier-project PATH` | one project (repeatable) |
 | `--prettier-projects` | every project |
 
-The selected projects are checked concurrently. Each line of Prettier's
-output starts with its project, e.g. `[packages/ui] [warn] src/a.ts`. A
-failure names every failing project and the step that failed, for example:
+### One check per project
+
+Each selected project has its own `format-check`, and the selected projects
+are checked concurrently. A project is one Prettier run: one
+`prettier --check .` from the project directory, with its own config,
+`.prettierignore` and Prettier, so the project is both the unit you select
+and the unit that runs. There is no finer check: Prettier names the files
+it found unformatted but not the ones it checked and passed, and which
+files it checks depends on its ignore files, overrides and plugins, which
+listing checks cannot evaluate without running it.
+
+A failure fails only its own project's check and names the step that
+failed. Each line of Prettier's output starts with its project, e.g.
+`[packages/ui] [warn] src/a.ts`, and files Prettier names by absolute path
+are given as workspace paths. A message keeps the last 32 KiB of each
+output stream, marked when cut, however much the run printed:
 
 ```
-Prettier failed in 3 project(s):
-- a: install failed (npm install, exit 1):
-  npm error 404 Not Found - GET https://registry.npmjs.org/...
-- b: prettier --check failed (exit 1):
-  [b] [warn] index.js
-- c: prettier is not installed: add it to the devDependencies of c/package.json (...)
+install failed (npm install, exit 1):
+npm error 404 Not Found - GET https://registry.npmjs.org/...
+
+prettier --check failed (exit 1):
+[b] [warn] index.js
+
+prettier is not installed: add it to the devDependencies of c/package.json (...)
+
+Prettier did not run: the config file that makes d a project is ignored by a .gitignore, ...
 ```
+
+- **Shared install.** Projects with the same install root (see
+  [Dependencies](#dependencies)) run the same install, so it runs once for
+  all of them, and a failed install fails every one of them.
+- **Nested projects.** A nested project's files are checked only by its own
+  check, so an unformatted file there fails the nested project, never its
+  parent, and selecting the parent alone does not check it.
+- **Not run.** A selected project Prettier would never see fails rather
+  than passing with nothing checked (see [Discovery](#discovery)).
+
+The collection-level `formatCheck` is a plain helper, not a check (see
+[Use from another module](#use-from-another-module)), so `dagger check`
+never checks a project twice. There is no `.batch` namespace.
 
 ## Fixing formatting
 
@@ -131,8 +167,11 @@ Prettier a second time next to `format-check`.
 
 Prettier runs from the project directory.
 
-**Without a `package.json`** at or above the project, `npx` fetches the latest
-Prettier, so a standalone Prettier config works without a Node project.
+**Without a `package.json`** at or above the project, a pinned Prettier runs
+(the `version` setting, 3.9.10 by default), so a standalone Prettier config
+works without a Node project. It is installed once for the workspace in a
+pinned image and mounted into the project's container; nothing is fetched
+when a check runs.
 
 **With one**, dependencies are installed and the project's own Prettier runs:
 the nearest `node_modules/.bin/prettier` between the project and the install
@@ -191,23 +230,25 @@ baseImageAddress = "node:22-alpine"      # default: node:25-alpine; any image wi
 packageManager = "pnpm"                  # default: "" (detect); npm, yarn, pnpm or bun
 installFlags = ["--ignore-scripts"]      # default: []; appended to the install command
 environment = ["NODE_OPTIONS=--max-old-space-size=4096"]  # default: []; KEY=VALUE for Prettier
+version = "3.9.10"                       # default: 3.9.10; exact Prettier version for projects without a package.json
 ```
 
 ## Use from another module
 
-`projects(ws)` returns the collection. `keys`, `get(key:)`, `subset(keys:)`
-and `batch` work on it:
+`projects(ws)` returns the collection. `keys`, `get(key:)` and
+`subset(keys:)` work on it, and so do two helpers over its projects,
+`format` and `formatCheck`:
 
 ```dang
 let projects = prettier.projects(ws)
 projects.keys                                             # ["app", "packages/ui", ...]
 projects.get(key: "app").format(ws)                       # Changeset for one project
-projects.subset(keys: ["app", "packages/ui"]).batch.format(ws)
+projects.subset(keys: ["app", "packages/ui"]).format(ws)  # one Changeset for both
 prettier.project(ws, "packages/ui/src").path              # "packages/ui"
 ```
 
-A check called through a dependency returns a `Check` that has not run yet.
-Run it and raise on failure:
+A project's `formatCheck` is a check, so called through a dependency it
+returns a `Check` that has not run yet. Run it and raise on failure:
 
 ```dang
 let run(check: Check!): Void {
@@ -217,8 +258,20 @@ let run(check: Check!): Void {
   null
 }
 
-run(prettier.projects(ws).batch.formatCheck(ws))
 run(prettier.projects(ws).get(key: "app").formatCheck(ws))
 ```
 
-The end-to-end tests in `.dagger/modules/e2e` exercise all of this.
+The collection's `formatCheck` is a plain function: it checks the projects
+concurrently and raises one error naming every failing project and its
+step, e.g. `Prettier failed in 2 project(s):\n- a: ...\n- b: ...`:
+
+```dang
+prettier.projects(ws).formatCheck(ws)
+```
+
+These calls do not see a `dagger check` selection: a direct call gets the
+whole collection, or the `subset` you ask for.
+
+The end-to-end tests in `.dagger/modules/e2e` exercise all of this. Its
+`selected-*` checks run `dagger check` through the CLI on fixtures, since
+only the CLI applies the selection.

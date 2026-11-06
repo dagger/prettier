@@ -24,6 +24,11 @@ type Prettier {
   """
   environment: [String!]!
 
+  """
+  Prettier version for projects with no package.json at or above them.
+  """
+  version: String!
+
   new(
     """
     Base image for Prettier containers, e.g. "node:22".
@@ -43,11 +48,17 @@ type Prettier {
     Environment variables for Prettier, as KEY=VALUE.
     """
     environment: [String!]! = [],
+    """
+    Exact Prettier version for projects with no package.json at or above
+    them. A project with one runs the Prettier it installs.
+    """
+    version: String! = "3.9.10",
   ) {
     self.baseImageAddress = baseImageAddress
     self.packageManager = packageManager
     self.installFlags = installFlags
     self.environment = environment
+    self.version = version
     self
   }
 
@@ -253,7 +264,53 @@ type Prettier {
   }
 
   """
-  Keys feed cache keys and batch arguments, so give them a stable order.
+  Pinned images for the helpers below. They never run project code.
+  """
+  let toolImage: String! = "node:25.9.0-alpine3.23"
+  let helperImage: String! = "alpine:3.23.8"
+
+  """
+  Prettier at version, installed once for the workspace in a pinned image,
+  for projects that install none of their own. Prettier has no
+  dependencies, so the version fixes the files.
+  """
+  let standalone: Directory! {
+    container
+      .from(toolImage)
+      .withEnvVariable("npm_config_update_notifier", "false")
+      .withExec(["npm", "install", "--prefix", "/opt/prettier", "--no-save", "--no-package-lock", "prettier@" + version])
+      .directory("/opt/prettier")
+  }
+
+  """
+  How much of each output stream a failure message keeps.
+  """
+  let tailBytes: Int! = 32768
+
+  """
+  The end of an output file, at most tailBytes and marked when cut. It is
+  cut in a pinned helper container, so however much a run prints, no more
+  than that is read back.
+  """
+  let tail(file: File!): String! {
+    container
+      .from(helperImage)
+      .withFile("/in", file)
+      .withExec(
+        [
+          "sh",
+          "-c",
+          "if [ \"$(wc -c < /in)\" -gt " + toString(tailBytes) + " ]; then "
+            + "echo '[earlier output omitted; showing the end]'; fi; tail -c " + toString(tailBytes) + " /in",
+        ],
+        redirectStdout: "/out",
+      )
+      .file("/out")
+      .contents
+  }
+
+  """
+  Keys feed cache keys, so give them a stable order.
   """
   let sorted(items: [String!]!): [String!]! {
     let empty: [String!]! = []
@@ -282,9 +339,12 @@ type PrettierProjects @collection {
   }
 
   """
-  Check formatting of the selected projects.
+  Check formatting of the selected projects, reporting every failing one.
+
+  A plain helper, not a check: `dagger check` runs each project's own
+  format-check, so marking this one too would check every project twice.
   """
-  formatCheck(ws: Workspace!): Void @check {
+  formatCheck(ws: Workspace!): Void {
     # A selection over a list evaluates its elements concurrently, so every
     # project is checked in parallel and every failure is reported.
     let failures = paths.map { p => project(p) }.{{path, failure: checkFailure(ws)}}
@@ -358,12 +418,14 @@ type PrettierProject {
 
   """
   Why checking this project failed, naming the step, or null when it is
-  formatted. It never raises, so a batch reports every project.
+  formatted. It never raises, so the collection helper reports every
+  project.
   """
   let checkFailure(ws: Workspace!): String {
     {
-      let install = installFailure(ws)
-      if (install != null) { install } else { toolFailure(checkExec(ws), "prettier --check") }
+      let missing = sourceFailure(ws)
+      let install = if (missing != null) { missing } else { installFailure(ws) }
+      if (install != null) { install } else { toolFailure(ws, checkExec(ws), "prettier --check") }
     } rescue {
       err: Error => err.message
     }
@@ -375,29 +437,88 @@ type PrettierProject {
   let formatFailure(ws: Workspace!): String {
     {
       let install = installFailure(ws)
-      if (install != null) { install } else { toolFailure(formatExec(ws), "prettier --write") }
+      if (install != null) { install } else { toolFailure(ws, formatExec(ws), "prettier --write") }
     } rescue {
       err: Error => err.message
     }
   }
 
+  """
+  Why Prettier would never check this project, or null. Discovery reads
+  config file names in the workspace, but Prettier runs on the source without
+  gitignored files: when that drops the project's config (it, or its
+  directory, is gitignored), Prettier would check nothing there, or check it
+  under another config, and pass. Fail instead of passing with nothing behind
+  it.
+  """
+  let sourceFailure(ws: Workspace!): String {
+    let root = installRoot(ws)
+    let mount = root ?? path
+    let dir = tool.relativeTo(mount, path)
+    let entries = { source(ws, mount).directory(dir).entries } rescue {
+      err: Error => emptyList
+    }
+    if (entries.any { name => tool.configFiles.contains(name) }) {
+      null
+    } else {
+      "Prettier did not run: the config file that makes " + path
+        + " a project is ignored by a .gitignore, so it is not in the source Prettier runs on"
+    }
+  }
+
+  """
+  The source Prettier runs on: mount, without node_modules and gitignored
+  files.
+  """
+  let source(ws: Workspace!, mount: String!): Directory! {
+    ws.directory("/" + mount, exclude: ["**/node_modules"], gitignore: true)
+  }
+
   let checkExec(ws: Workspace!): Container! {
-    runner(ws).withExec(prettier(["--check", "."] + excludes(ws)), expect: ReturnType.ANY)
+    runner(ws).withExec(
+      prettier(["--check", "."] + excludes(ws)),
+      expect: ReturnType.ANY,
+      redirectStdout: "/tmp/prettier.stdout",
+      redirectStderr: "/tmp/prettier.stderr",
+    )
   }
 
   let formatExec(ws: Workspace!): Container! {
-    runner(ws).withExec(prettier(["--write", "."] + excludes(ws)), expect: ReturnType.ANY)
+    runner(ws).withExec(
+      prettier(["--write", "."] + excludes(ws)),
+      expect: ReturnType.ANY,
+      redirectStdout: "/tmp/prettier.stdout",
+      redirectStderr: "/tmp/prettier.stderr",
+    )
   }
 
-  let toolFailure(ran: Container!, step: String!): String {
+  """
+  Why Prettier failed, from the end of its error output, or null. Prettier
+  names files by their path in the container; they are given as workspace
+  paths, so a config Prettier cannot read is named as the file to fix.
+  """
+  let toolFailure(ws: Workspace!, ran: Container!, step: String!): String {
     let code = ran.exitCode
     if (code == 0) {
       null
-    } else if (code == 127) {
-      ran.stderr.trim(" \n")
     } else {
-      step + " failed (exit " + toString(code) + "):\n" + ran.stderr.trim(" \n")
+      let output = workspacePaths(ws, tool.tail(ran.file("/tmp/prettier.stderr")).trim(" \n"))
+      if (code == 127) {
+        output
+      } else {
+        step + " failed (exit " + toString(code) + "):\n" + output
+      }
     }
+  }
+
+  """
+  text with the container paths of the mounted source, /src/..., given as
+  workspace paths.
+  """
+  let workspacePaths(ws: Workspace!, text: String!): String! {
+    let mount = installRoot(ws) ?? path
+    let prefix = if (mount == ".") { "" } else { mount + "/" }
+    text.replaceMatches(`(^|[\s"'(])/src/`, with: "${1}" + prefix)
   }
 
   """
@@ -406,6 +527,11 @@ type PrettierProject {
   by that name would call itself forever.
   """
   let wrapperPath: String! = "/usr/local/bin/dagger-prettier"
+
+  """
+  Where runner mounts the standalone Prettier, outside the source.
+  """
+  let standalonePath: String! = "/opt/dagger-prettier"
 
   let prettier(args: [String!]!): [String!]! {
     # Called by name, which labels each line of output in the TUI.
@@ -416,12 +542,13 @@ type PrettierProject {
   The prettier command in runner. It runs the project's own Prettier (the
   nearest node_modules/.bin/prettier between the working directory and the
   install root, or yarn's under Plug'n'Play) and says how to fix it when
-  there is none; without an install root, npx fetches Prettier. Every output
-  line is prefixed with the project, since a batch runs several at once.
+  there is none; without an install root, the pinned standalone Prettier
+  runs. Every output
+  line is prefixed with the project, since several projects run at once.
   """
   let wrapper(root: String): String! {
     let locate = if (root == null) {
-      "set -- npx --yes prettier \"$@\"\n"
+      "set -- node " + standalonePath + "/node_modules/prettier/bin/prettier.cjs \"$@\"\n"
     } else {
       "found=\n"
         + "d=\"$PWD\"\n"
@@ -636,7 +763,12 @@ type PrettierProject {
       .nodeBase(packageManager(ws, root))
       .withDirectory("/src", installInputs(ws, root))
       .withWorkdir("/src")
-      .withExec(installCommand(ws, root), expect: ReturnType.ANY)
+      .withExec(
+        installCommand(ws, root),
+        expect: ReturnType.ANY,
+        redirectStdout: "/tmp/install.stdout",
+        redirectStderr: "/tmp/install.stderr",
+      )
   }
 
   """
@@ -652,7 +784,10 @@ type PrettierProject {
       if (code == 0) {
         null
       } else {
-        let output = (ran.stdout.trim(" \n") + "\n" + ran.stderr.trim(" \n")).trim(" \n")
+        let output = (
+          tool.tail(ran.file("/tmp/install.stdout")).trim(" \n") + "\n"
+            + tool.tail(ran.file("/tmp/install.stderr")).trim(" \n")
+        ).trim(" \n")
         "install failed (" + installCommand(ws, root ?? ".").join(" ") + ", exit " + toString(code)
           + "):\n" + output.split("\n").takeLast(15).join("\n")
       }
@@ -688,17 +823,17 @@ type PrettierProject {
   """
   Container that runs Prettier, with this project as the working directory.
   With a package.json at or above the project, the install root's
-  dependencies are installed and the source laid over them; otherwise npx
-  fetches Prettier on demand.
+  dependencies are installed and the source laid over them; otherwise the
+  pinned standalone Prettier is mounted beside the source.
   """
   let runner(ws: Workspace!): Container! {
     let root = installRoot(ws)
     let mount = root ?? path
-    let source = ws.directory("/" + mount, exclude: ["**/node_modules"], gitignore: true)
+    let src = source(ws, mount)
     let ctr = if (root == null) {
-      tool.nodeBase("npm").withDirectory("/src", source)
+      tool.nodeBase("npm").withDirectory(standalonePath, tool.standalone).withDirectory("/src", src)
     } else {
-      installed(ws, root ?? ".").withDirectory("/src", source)
+      installed(ws, root ?? ".").withDirectory("/src", src)
     }
     let dir = tool.relativeTo(mount, path)
     let configured = tool.environment.reduce(ctr) { acc, pair =>

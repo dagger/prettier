@@ -50,6 +50,16 @@ type E2e {
     }
   }
 
+  """
+  The failure message of the collection's formatCheck helper, which raises
+  rather than returning a Check, or "unexpected success".
+  """
+  let helperFailure(projects: PrettierProjects!, ws: Workspace!): String! {
+    { projects.formatCheck(ws); "unexpected success" } rescue {
+      err: Error => err.message
+    }
+  }
+
   let changed(changes: Changeset!): [String!]! {
     changes.addedPaths + changes.modifiedPaths + changes.removedPaths
   }
@@ -66,9 +76,10 @@ type E2e {
     let projects = prettier.projects(ws)
     assert(projects.keys == ["."], "hello-dagger projects: " + projects.keys.join(", "))
 
-    assert(failure(projects.batch.formatCheck(ws)).contains("[warn]"), "unformatted hello-dagger passed")
+    assert(failure(projects.get(key: ".").formatCheck(ws)).contains("[warn]"), "unformatted hello-dagger passed")
+    assert(helperFailure(projects, ws).contains("[warn]"), "the collection helper passed unformatted hello-dagger")
 
-    let changes = projects.batch.format(ws)
+    let changes = projects.format(ws)
     assert(changes.modifiedPaths.length > 0, "formatting hello-dagger changed nothing")
     assert(
       changes.addedPaths.length == 0 and changes.removedPaths.length == 0,
@@ -76,7 +87,8 @@ type E2e {
     )
 
     let result = changes.after.asWorkspace
-    run(prettier.projects(result).batch.formatCheck(result))
+    run(prettier.projects(result).get(key: ".").formatCheck(result))
+    prettier.projects(result).formatCheck(result)
   }
 
   """
@@ -125,7 +137,7 @@ type E2e {
   """
   get and list build the projects at their keys; subset keeps parent order,
   rejects unknown and duplicate keys, and narrows what get accepts and what
-  the batches run.
+  the collection helpers run.
   """
   collectionCheck(ws: Workspace!): Void @check {
     let projects = prettier.projects(ws)
@@ -139,11 +151,11 @@ type E2e {
     assert(pair.keys == [formatted, nested], "subset did not keep parent order: " + pair.keys.join(", "))
 
     # The unformatted fixture is in the collection but outside the subset.
-    run(pair.batch.formatCheck(ws))
-    let clean = pair.batch.format(ws)
+    pair.formatCheck(ws)
+    let clean = pair.format(ws)
     assert(clean.isEmpty, "formatting formatted projects changed: " + changed(clean).join(", "))
 
-    let mixed = projects.subset(keys: [formatted, unformatted]).batch.format(ws)
+    let mixed = projects.subset(keys: [formatted, unformatted]).format(ws)
     assert(
       changed(mixed) == [unformatted + "/index.js", unformatted + "/src/util.js"],
       "formatting a mixed subset changed: " + changed(mixed).join(", "),
@@ -169,8 +181,8 @@ type E2e {
 
     let none = projects.subset(keys: [])
     assert(none.keys.length == 0, "empty subset kept keys: " + none.keys.join(", "))
-    run(none.batch.formatCheck(ws))
-    assert(none.batch.format(ws).isEmpty, "empty subset changed files")
+    none.formatCheck(ws)
+    assert(none.format(ws).isEmpty, "empty subset changed files")
     null
   }
 
@@ -212,7 +224,7 @@ type E2e {
   }
 
   """
-  An unformatted project fails its own check and the batch alike. Formatting
+  An unformatted project fails its own check and the collection helper alike. Formatting
   it changes only its source files, rooted at the working directory; an
   enclosing project contributes only the working directory's subtree.
   """
@@ -220,15 +232,13 @@ type E2e {
     let projects = prettier.projects(ws)
     let own = failure(projects.get(key: unformatted).formatCheck(ws))
     assert(own.contains("[warn] index.js"), "the unformatted project passed: " + own)
-    let batch = failure(
-      projects.subset(keys: [formatted, unformatted]).batch.formatCheck(ws),
-    )
-    assert(batch.contains("- " + unformatted + ":"), "the batch did not name the failing project: " + batch)
-    assert(batch.contains("- " + formatted + ":") == false, "the batch blamed a formatted project: " + batch)
+    let helper = helperFailure(projects.subset(keys: [formatted, unformatted]), ws)
+    assert(helper.contains("- " + unformatted + ":"), "the helper did not name the failing project: " + helper)
+    assert(helper.contains("- " + formatted + ":") == false, "the helper blamed a formatted project: " + helper)
     # Several projects run at once, so each output line names its project.
     assert(
-      batch.contains("[" + unformatted + "] [warn] index.js"),
-      "Prettier's output was not prefixed with the project: " + batch,
+      helper.contains("[" + unformatted + "] [warn] index.js"),
+      "Prettier's output was not prefixed with the project: " + helper,
     )
 
     # The package.json install writes a lockfile; only Prettier's edits come
@@ -256,8 +266,8 @@ type E2e {
   }
 
   """
-  Prettier errors fail the check and formatting, and the batches report
-  every failing project.
+  Prettier errors fail the check and formatting, and the collection helpers
+  report every failing project.
   """
   failureCheck(ws: Workspace!): Void @check {
     let broken = directory
@@ -275,24 +285,24 @@ type E2e {
     }
     assert(one.contains("SyntaxError"), "a syntax error did not fail formatting: " + one)
 
-    let all = { projects.batch.format(broken).isEmpty; "unexpected success" } rescue {
+    let all = { projects.format(broken).isEmpty; "unexpected success" } rescue {
       err: Error => err.message
     }
     assert(
       all.contains("- a:") and all.contains("- b:") and all.contains("- c:") == false,
-      "the format batch did not report exactly the failing projects: " + all,
+      "the format helper did not report exactly the failing projects: " + all,
     )
 
-    let checked = failure(projects.batch.formatCheck(broken))
+    let checked = helperFailure(projects, broken)
     assert(
       checked.contains("- a:") and checked.contains("- b:") and checked.contains("- c:") == false,
-      "the check batch did not report exactly the failing projects: " + checked,
+      "the check helper did not report exactly the failing projects: " + checked,
     )
-    # These projects have no package.json, so npx runs Prettier. It must
-    # find the real one, not the module's wrapper, which would call itself.
+    # These projects have no package.json, so the standalone Prettier runs.
+    # The wrapper must run it, not itself.
     assert(
       checked.contains("[a] [error]") and checked.contains("[a] [a]") == false,
-      "npx ran the wrapper instead of Prettier: " + checked,
+      "the wrapper ran itself instead of Prettier: " + checked,
     )
     null
   }
@@ -348,8 +358,8 @@ type E2e {
   }
 
   """
-  A batch names every failing project and the step that failed: the install,
-  a missing Prettier, or Prettier itself.
+  The collection helper names every failing project and the step that
+  failed: the install, a missing Prettier, or Prettier itself.
   """
   installFailureCheck(ws: Workspace!): Void @check {
     let broken = directory
@@ -367,8 +377,8 @@ type E2e {
       .withNewFile("d/.prettierrc", "{}\n")
       .withNewFile("d/index.js", "export const d = 1;\n")
       .asWorkspace
-    let message = failure(prettier.projects(broken).batch.formatCheck(broken))
-    assert(message.contains("in 3 project(s)"), "the batch did not count the failures: " + message)
+    let message = helperFailure(prettier.projects(broken), broken)
+    assert(message.contains("in 3 project(s)"), "the helper did not count the failures: " + message)
     assert(message.contains("- a: install failed (npm install, exit"), "the install failure was not named: " + message)
     assert(message.contains("- b: prettier --check failed (exit 1)"), "the formatting failure was not named: " + message)
     assert(message.contains("[warn] index.js"), "Prettier's report was lost: " + message)
@@ -438,6 +448,262 @@ type E2e {
     run(project.formatCheck(ws))
     let changes = project.format(ws)
     assert(changes.isEmpty, "formatting a formatted PnP project changed: " + changed(changes).join(", "))
+    null
+  }
+
+  """
+  A project whose config a .gitignore drops from the source fails as not
+  run, rather than passing with nothing checked.
+  """
+  gitignoredCheck(ws: Workspace!): Void @check {
+    let ignored = directory
+      .withNewFile(".gitignore", "ignored/\nconfig-only/.prettierrc\n")
+      .withNewFile("ignored/.prettierrc", "{}\n")
+      .withNewFile("ignored/index.js", "export const i={i:1}\n")
+      .withNewFile("config-only/.prettierrc", "{}\n")
+      .withNewFile("config-only/index.js", "export const c = 1;\n")
+      .withNewFile("kept/.prettierrc", "{}\n")
+      .withNewFile("kept/index.js", "export const k = 1;\n")
+      .asWorkspace
+    let projects = prettier.projects(ignored)
+    assert(projects.keys == ["config-only", "ignored", "kept"], "gitignored projects: " + projects.keys.join(", "))
+    ["config-only", "ignored"].map { key =>
+      let message = failure(projects.get(key: key).formatCheck(ignored))
+      assert(message.contains("Prettier did not run"), "a gitignored project passed: " + key + ": " + message)
+    }
+    run(projects.get(key: "kept").formatCheck(ignored))
+    null
+  }
+
+  # Only the unindented CHECKS header counts.
+  let checkSummaryMatches(output: String!, passed: Int!, failed: Int!): Boolean! {
+    let headers = output.split("\n").filter { line =>
+      line.hasPrefix("CHECKS ") or line.hasPrefix("== CHECKS ==")
+    }
+    let expected = (if (failed > 0) { ["✘", toString(failed), "failed"] } else { [] })
+      + (if (passed > 0) { ["✔", toString(passed), "passed"] } else { [] })
+    headers.length == 1 and headers[0]!.trimPrefix("== ").trimPrefix("CHECKS").trimPrefix(" ==")
+      .trimSpace.split(" ").filter { word => word != "" } == expected
+  }
+
+  selectedSummaryCheck: Void @check {
+    assert(checkSummaryMatches("CHECKS  ✘ 1 failed  ✔ 2 passed\n", 2, 1), "mixed counts were not recognized")
+    assert(checkSummaryMatches("== CHECKS ==  ✔ 2 passed\n", 2, 0), "agent report was not recognized")
+    assert(checkSummaryMatches("CHECKS  ✔ 12 passed\n", 2, 0) == false, "accepted a partial count")
+    assert(checkSummaryMatches("  CHECKS  ✔ 2 passed\n", 2, 0) == false, "accepted a nested header")
+    null
+  }
+
+  """
+  Run dagger check through the CLI on a fixture with this module installed
+  as prettier, and assert the totals and messages. Direct Dang calls do not
+  apply the engine's selection, so selection is tested this way. The engine
+  supplies its matching CLI.
+  """
+  let cli(ws: Workspace!, fixture: Directory!, args: [String!]!): Container! {
+    container
+      .from("alpine:3.23.8")
+      .withEnvVariable("NO_COLOR", "1")
+      .withDirectory("/source", ws.directory("/", exclude: ["testdata/**", "**/node_modules"]))
+      .withDirectory("/work", fixture)
+      .withNewFile("/work/.git/HEAD", "ref: refs/heads/main\n")
+      .withNewFile("/work/dagger.toml", "[modules.prettier]\nsource = \"/source\"\n")
+      .withWorkdir("/work")
+      .withExec(["/dev/.dagger/dagger"] + args, expect: ReturnType.ANY, daggerInDaggerNewSession: true)
+  }
+
+  let selectedCheck(
+    ws: Workspace!,
+    fixture: Directory!,
+    args: [String!]!,
+    passed: Int!,
+    failed: Int! = 0,
+    messages: [String!]! = [],
+    absent: [String!]! = [],
+  ): Void {
+    let result = cli(ws, fixture, ["--progress=report", "check", "--generated=false"] + args)
+    let output = result.stdout + result.stderr
+    assert((result.exitCode == 0) == (failed == 0), "unexpected check exit status:\n" + output)
+    assert(checkSummaryMatches(output, passed, failed), "unexpected Dagger check totals:\n" + output)
+    messages.map { message =>
+      assert(output.contains(message), "missing " + message + ":\n" + output)
+    }
+    absent.map { message =>
+      assert(output.contains(message) == false, "unexpected " + message + ":\n" + output)
+    }
+    null
+  }
+
+  """
+  Three standalone projects; c is unformatted.
+  """
+  let selectionFixture: Directory! {
+    directory
+      .withNewFile("a/.prettierrc", "{}\n")
+      .withNewFile("a/index.js", "export const a = 1;\n")
+      .withNewFile("b/.prettierrc", "{}\n")
+      .withNewFile("b/index.js", "export const b = 1;\n")
+      .withNewFile("c/.prettierrc", "{}\n")
+      .withNewFile("c/index.js", "export const c={c:1}\n")
+  }
+
+  """
+  Selected projects run; the unformatted one left out does not.
+  """
+  selectedProjectsCheck(ws: Workspace!): Void @check {
+    selectedCheck(
+      ws,
+      selectionFixture,
+      ["--prettier-project=a", "--prettier-project=b"],
+      passed: 2,
+      absent: ["[c]"],
+    )
+  }
+
+  """
+  A failure fails only the project it is in.
+  """
+  selectedFailureCheck(ws: Workspace!): Void @check {
+    selectedCheck(
+      ws,
+      selectionFixture,
+      [],
+      passed: 2,
+      failed: 1,
+      messages: ["prettier --check failed (exit 1)", "[c] [warn] index.js"],
+    )
+  }
+
+  """
+  A failed install fails every project installing at that root, and only
+  those.
+  """
+  selectedInstallFailureCheck(ws: Workspace!): Void @check {
+    let fixture = selectionFixture
+      .withoutDirectory("c")
+      .withNewFile(
+        "broken/package.json",
+        "{\"private\": true, \"devDependencies\": {\"@dagger-e2e-missing/nope\": \"1.0.0\"}}\n",
+      )
+      .withNewFile("broken/x/.prettierrc", "{}\n")
+      .withNewFile("broken/x/index.js", "export const x = 1;\n")
+      .withNewFile("broken/y/.prettierrc", "{}\n")
+      .withNewFile("broken/y/index.js", "export const y = 1;\n")
+    selectedCheck(ws, fixture, [], passed: 2, failed: 2, messages: ["install failed (npm install, exit"])
+  }
+
+  """
+  A nested project's files belong to it alone: an unformatted file there
+  fails the nested project, not its parent, and selecting the parent does
+  not check it.
+  """
+  selectedNestedCheck(ws: Workspace!): Void @check {
+    let fixture = directory
+      .withNewFile("p/.prettierrc", "{}\n")
+      .withNewFile("p/index.js", "export const p = 1;\n")
+      .withNewFile("p/n/.prettierrc", "{}\n")
+      .withNewFile("p/n/index.js", "export const n={n:1}\n")
+    selectedCheck(ws, fixture, ["--prettier-project=p"], passed: 1, absent: ["[p/n]"])
+    selectedCheck(ws, fixture, [], passed: 1, failed: 1, messages: ["[p/n] [warn] index.js"])
+  }
+
+  """
+  A selected project Prettier would never check fails as not run.
+  """
+  selectedNeverRanCheck(ws: Workspace!): Void @check {
+    let fixture = selectionFixture
+      .withoutDirectory("c")
+      .withNewFile(".gitignore", "ignored/\n")
+      .withNewFile("ignored/.prettierrc", "{}\n")
+      .withNewFile("ignored/index.js", "export const i={i:1}\n")
+    selectedCheck(ws, fixture, [], passed: 2, failed: 1, messages: ["Prettier did not run"])
+  }
+
+  """
+  A project whose config Prettier cannot read fails alone, naming the
+  config file by its workspace path.
+  """
+  selectedBadConfigCheck(ws: Workspace!): Void @check {
+    let fixture = selectionFixture
+      .withoutDirectory("c")
+      .withNewFile("bad/.prettierrc", "{ \"semi\": \n")
+      .withNewFile("bad/index.js", "export const bad = 1;\n")
+    selectedCheck(
+      ws,
+      fixture,
+      [],
+      passed: 2,
+      failed: 1,
+      messages: ["Invalid configuration for file \"bad/.prettierrc\""],
+      absent: ["/src/"],
+    )
+  }
+
+  """
+  Span ids of the lines of a plain progress log that mention text: the
+  engine gives one span to one operation, however many callers share it.
+  """
+  let spans(log: String!, text: String!): [String!]! {
+    log.split("\n").filter { line => line.contains(text) }.map { line => line.split(" ")[0]! }.uniq
+  }
+
+  """
+  Projects sharing an install root share one install, and each project is
+  one Prettier run.
+  """
+  selectedOneRunCheck(ws: Workspace!): Void @check {
+    let fixture = directory
+      .withNewFile("package.json", "{\"private\": true, \"devDependencies\": {\"prettier\": \"3.6.2\"}}\n")
+      .withNewFile("x/.prettierrc", "{}\n")
+      .withNewFile("x/index.js", "export const x = 1;\n")
+      .withNewFile("y/.prettierrc", "{}\n")
+      .withNewFile("y/index.js", "export const y = 1;\n")
+      .withNewFile("z/.prettierrc", "{}\n")
+      .withNewFile("z/index.js", "export const z = 1;\n")
+    let result = cli(ws, fixture, ["--progress=plain", "-vvv", "check", "--generated=false"])
+    let output = result.stdout + result.stderr
+    assert(result.exitCode == 0, "the checks failed:\n" + output)
+    let installs = spans(output, "withExec npm install")
+    assert(installs.length == 1, "install ran " + toString(installs.length) + " times:\n" + output)
+    let runs = spans(output, "withExec dagger-prettier --check")
+    assert(runs.length == 3, "Prettier ran " + toString(runs.length) + " times for 3 projects:\n" + output)
+    null
+  }
+
+  """
+  Listing checks installs nothing and runs no Prettier, so it works when
+  every install and run would fail.
+  """
+  listingCheck(ws: Workspace!): Void @check {
+    let fixture = directory
+      .withNewFile("package.json", "{ not json\n")
+      .withNewFile("a/.prettierrc", "{ \"semi\": \n")
+      .withNewFile("a/index.js", "export const a={a:1}\n")
+      .withNewFile("b/.prettierrc.toml", "semi = false\n")
+    let result = cli(ws, fixture, ["--progress=plain", "-vvv", "check", "-l", "-a"])
+    let output = result.stdout + result.stderr
+    assert(result.exitCode == 0, "listing failed:\n" + output)
+    assert(result.stdout.contains("a ") and result.stdout.contains("b "), "listing missed a project:\n" + output)
+    ["withExec npm", "withExec pnpm", "withExec yarn", "withExec bun", "corepack", "dagger-prettier", "prettier@"].map { text =>
+      assert(output.contains(text) == false, "listing ran " + text + ":\n" + output)
+    }
+    null
+  }
+
+  """
+  A failure message keeps the end of Prettier's output, marked when cut,
+  however much it printed.
+  """
+  boundedOutputCheck: Void @check {
+    let digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]
+    let long = "a-file-name-long-enough-that-a-few-hundred-warnings-exceed-the-kept-output-tail"
+    let noisy = digits.reduce(directory.withNewFile("n/.prettierrc", "{}\n")) { dir, i =>
+      digits.reduce(dir) { inner, j => inner.withNewFile("n/" + long + "-" + i + j + ".js", "export const x={x:1}\n") }
+    }.asWorkspace
+    let message = failure(prettier.projects(noisy).get(key: "n").formatCheck(noisy))
+    assert(message.contains("[earlier output omitted; showing the end]"), "a long report was not cut: " + toString(message.length))
+    assert(message.length < 40000, "the kept output is too long: " + toString(message.length))
+    assert(message.contains("Run Prettier with --write to fix"), "the end of the report was lost")
     null
   }
 }
